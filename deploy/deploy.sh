@@ -104,6 +104,18 @@ echo "    api port      : $API_PORT"
 echo "    data dir      : $DEST/api/data/agents.json"
 echo "    admin key     : $DEST/api/config.json -> admin_key"
 echo "    site secret   : $DEST/website/js/config.js"
+
+# vnet preflight: every agent NIC attaches to this
+sleep 1
+NET_OK="$(curl -s "http://127.0.0.1:${API_PORT}/api/health" | grep -o '"net_bridge_ok":[a-z]*' | cut -d: -f2)"
+if [ "$NET_OK" = "true" ]; then
+  echo "    vnet preflight : sandbox vnet/bridge found — agent NICs will attach"
+elif [ "$NET_OK" = "false" ]; then
+  echo "    !! net_bridge_ok=false — create the 'sandbox' SDN vnet (or linux"
+  echo "       bridge) before provisioning; see proxmox/setup.sh for help"
+else
+  echo "    vnet preflight : couldn't query /api/health (API may still be warming up)"
+fi
 echo
 echo "    NEXT: point your router's port-forward rules at $MY_IP so the"
 echo "    website's web ports (80/443) reach this node. Then set your"

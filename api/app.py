@@ -248,6 +248,7 @@ class AgencyHandler(BaseHTTPRequestHandler):
                     return self.error_json(502, str(exc), "proxmox")
                 cpus = (node.get("cpuinfo") or {}).get("cpus", 0)
                 mem = node.get("memory", {})
+                bridge = cfg["container"].get("net_bridge", "sandbox")
                 return self.send_json(200, {
                     "ok": True,
                     "dry_run": cfg["dry_run"],
@@ -256,6 +257,8 @@ class AgencyHandler(BaseHTTPRequestHandler):
                     "cpus": cpus,
                     "mem_total_gb": round((mem.get("total") or 0) / 1073741824, 1),
                     "mem_used_gb": round((mem.get("used") or 0) / 1073741824, 1),
+                    "net_bridge": bridge,
+                    "net_bridge_ok": pve.net_exists(bridge),
                     "agents": {
                         "alive": store.alive_count(),
                         "total": len(store.all()),

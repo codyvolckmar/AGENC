@@ -72,10 +72,26 @@ else
 fi
 
 # --- 5. sanity checks ------------------------------------------------------
+NET_BRIDGE="${NET_BRIDGE:-sandbox}"
 echo "==> Sanity checks"
-ip link show vmbr0 >/dev/null 2>&1 \
-  && echo "    bridge vmbr0: present" \
-  || echo "    !! vmbr0 not found — update container.net_bridge in config.json"
+if pvesh get /cluster/sdn/vnets --output-format json 2>/dev/null | grep -q "\"vnet\": \"$NET_BRIDGE\""; then
+  echo "    network '$NET_BRIDGE': present (SDN vnet)"
+elif ip link show "$NET_BRIDGE" >/dev/null 2>&1; then
+  echo "    network '$NET_BRIDGE': present (linux bridge)"
+elif [ -n "${SDN_ZONE:-}" ]; then
+  echo "    creating SDN vnet '$NET_BRIDGE' in zone '$SDN_ZONE'"
+  pvesh create /cluster/sdn/vnets --vnet "$NET_BRIDGE" --zone "$SDN_ZONE" \
+    && { echo "    created — applying SDN:"; pvesh put /cluster/sdn/status >/dev/null 2>&1 || pvesh post /cluster/sdn/status >/dev/null 2>&1 || true; } \
+    || echo "    !! could not create vnet — create it in the GUI (Datacenter -> SDN) or run: SDN_ZONE=<zone> $0"
+else
+  echo "    !! network '$NET_BRIDGE' not found. Every agent NIC will attach to"
+  echo "       it, so create it first:"
+  echo "         - SDN vnet:      Datacenter -> SDN (Proxmox VE SDN), or"
+  echo "           SDN_ZONE=<your zone> .$0"
+  echo "         - linux bridge:  # ip link add $NET_BRIDGE type bridge; ip link set $NET_BRIDGE up"
+  echo "       then re-run this script. (VMs on the vnet need DHCP or static ip= in config.json)"
+fi
+ip link show vmbr0 >/dev/null 2>&1 && echo "    legacy vmbr0: present (unused by AGENCY)" || true
 pvesh get /nodes/$(hostname)/status --output-format json \
   | grep -o '"cpus":[0-9]*' | head -1 | sed 's/^/    host cpus: /'
 

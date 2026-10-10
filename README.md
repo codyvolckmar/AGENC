@@ -151,12 +151,26 @@ curl -X POST http://NODE/api/agents \
 | `disk_gb` | `8` | **max 8 GB rootfs** on `rootfs_storage` |
 | `cores` | `0` | `0` ⇒ use *all* host cores, shared: every agent can burst on any core (no pinning); `cpuunits` (1024) keeps the scheduler fair; set `cpulimit` to cap one agent |
 | `unprivileged` | `true` | unprivileged LXC (the community-scripts default) |
-| `net_bridge` | `vmbr0` | bridge networking, `ip: dhcp` |
+| `net_bridge` | `sandbox` | the **SDN vnet** (or linux bridge) every agent NIC attaches to — `bridge=sandbox` in net0 |
 | `features` | `nesting=1,keyctl=1` | useful for agents running nested tooling |
 | `vmid_start`/`vmid_end` | `1000`–`1999` | allocation range |
 
 Every home gets `tags: agenc` and a `description` with the agent id so you
 can see them in the Proxmox UI.
+
+### Networking — the `sandbox` vnet
+
+All provisioned NICs attach to the **`sandbox`** Proxmox SDN vnet (config:
+`container.net_bridge`). In Proxmox SDN, a container joins a vnet by using
+its name as the bridge: `net0: name=eth0,bridge=sandbox,...`. A plain linux
+bridge named `sandbox` also works. Before each provision the API verifies
+the target exists (`GET /cluster/sdn/vnets` + node network interfaces) and
+fails fast with a clear message otherwise; `/api/health` reports
+`net_bridge_ok` so you can catch it at deploy time (`proxmox/setup.sh` will
+detect the vnet and can even create it: `SDN_ZONE=<zone> ./proxmox/setup.sh`).
+
+`ip: dhcp` needs a DHCP server on the vnet — otherwise set
+`container.ip` to a static: `static=10.0.0.5/24,gw=10.0.0.1`.
 
 ## Billing model
 

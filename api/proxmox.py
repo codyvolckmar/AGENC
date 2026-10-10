@@ -202,6 +202,32 @@ class Proxmox:
                 return token
         return None
 
+    # ------------------------------------------------------------ network
+    def net_exists(self, name: str) -> bool:
+        """Is `name` a usable NIC target on the node?
+
+        Accepts an SDN vnet (Proxmox SDN) or a plain linux bridge — both are
+        valid `bridge=` values in a container's net0. Dry-run mode pretends
+        only the configured default ('sandbox') exists so the preflight is
+        demoable.
+        """
+        if self.dry_run:
+            self._sim("GET", "/cluster/sdn/vnets")
+            self._sim("GET", f"/nodes/{self.node}/network")
+            return name == "sandbox"
+        try:
+            vnets = self._request("GET", "/cluster/sdn/vnets") or []
+            for vnet in vnets:
+                if str(vnet.get("vnet")) == name:
+                    return True
+        except ProxmoxError:
+            pass  # SDN may not be enabled — fall through to linux bridges
+        try:
+            ifaces = self._request("GET", f"/nodes/{self.node}/network") or []
+            return any(i.get("name") == name and i.get("type") == "bridge" for i in ifaces)
+        except ProxmoxError:
+            return False
+
     # ------------------------------------------------------------ misc
     def _next_seq(self) -> int:
         self._sim_counter[0] += 1
