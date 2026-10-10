@@ -27,7 +27,11 @@ def main(cfg_path: str, token_file: str) -> int:
 
     if os.path.exists(token_file):
         token = open(token_file, "r", encoding="utf-8").read().strip()
-        secret = token.split("=", 1)[1].strip() if "=" in token else token
+        # file format: PVEAPIToken=agenc-bot@pve!agenc=<secret>  (TWO '=' signs)
+        secret = token.rsplit("=", 1)[1].strip() if "=" in token else token
+        if "=" in secret or "@" in secret:
+            print("    !! parsed token secret looks wrong (still contains id) — leaving untouched")
+            return 1
         if current == secret:
             print("    token secret matches — kept")
         else:
