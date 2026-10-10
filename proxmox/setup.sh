@@ -16,16 +16,45 @@ STORAGE="${STORAGE:-local}"
 OS_TEMPLATE="${OS_TEMPLATE:-ubuntu-24.04-standard_24.04-2_amd64.tar.zst}"
 TOKEN_FILE="${TOKEN_FILE:-/root/.agenc-token}"
 
-PRIVS="VM.Allocate VM.Audit VM.Clone VM.Config.CPU VM.Config.Disk VM.Config.Memory VM.Config.Network VM.Config.Options VM.Monitor VM.PowerMgmt Datastore.Allocate Datastore.AllocateTemplate Datastore.Audit Sys.Audit"
+# Privilege sets for the AGENCY service role.
+#
+# IMPORTANT (PVE 9): 'VM.Monitor' was REMOVED in Proxmox VE 9.0 (replaced by
+# VM.GuestAgent.* privileges) — pveum rejects it with "invalid privilege
+# 'VM.Monitor'". It is therefore NOT listed here. The script first tries the
+# full intersection-safe set, and if pveum reports an unknown privilege for
+# this PVE version, it falls back to a minimal set.
+PRIVS_MAIN="VM.Allocate VM.Audit VM.Clone VM.Config.CPU VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.PowerMgmt Datastore.Allocate Datastore.AllocateTemplate Datastore.Audit Sys.Audit"
+PRIVS_MIN="VM.Allocate VM.Audit VM.Config.CPU VM.Config.Disk VM.Config.Memory VM.Config.Network VM.Config.Options Datastore.Allocate Datastore.AllocateTemplate Datastore.Audit Sys.Audit"
 
 echo "==> AGENCY node setup on $(hostname)"
 
 # --- 1. least-privilege role -------------------------------------------
+# Tries each candidate set until one is accepted by this PVE's pveum.
+ROLE_PRIVS_USED=""
+ensure_role() {
+  local role="$1"; shift
+  local privs output
+  ROLE_PRIVS_USED=""
+  for privs in "$@"; do
+    if pveum role list --output-format json 2>/dev/null | grep -q "\"${role}\""; then
+      output="$(pveum role modify "$role" --privs "$privs" 2>&1)" && { ROLE_PRIVS_USED="$privs"; return 0; }
+    else
+      output="$(pveum role add "$role" --privs "$privs" 2>&1)" && { ROLE_PRIVS_USED="$privs"; return 0; }
+    fi
+  done
+  echo "$output" >&2
+  return 1
+}
 echo "==> Ensuring role '${ROLE}'"
-if pveum role list --output-format json 2>/dev/null | grep -q "\"${ROLE}\""; then
-  pveum role modify "$ROLE" --privs "$PRIVS"
+if ensure_role "$ROLE" "$PRIVS_MAIN" "$PRIVS_MIN"; then
+  if [ "$ROLE_PRIVS_USED" = "$PRIVS_MIN" ]; then
+    echo "    ok (reduced privileges — this PVE version rejected optional privileges)"
+  else
+    echo "    ok"
+  fi
 else
-  pveum role add "$ROLE" --privs "$PRIVS"
+  echo "!! could not create/modify role '${ROLE}' — last pveum error above" >&2
+  exit 1
 fi
 
 # --- 2. service user + ACL ---------------------------------------------
@@ -74,7 +103,7 @@ fi
 # --- 5. sanity checks ------------------------------------------------------
 NET_BRIDGE="${NET_BRIDGE:-sandbox}"
 echo "==> Sanity checks"
-if pvesh get /cluster/sdn/vnets --output-format json 2>/dev/null | grep -q "\"vnet\": \"$NET_BRIDGE\""; then
+if pvesh get /cluster/sdn/vnets --output-format json 2>/dev/null | grep -qE '"vnet"[[:space:]]*:[[:space:]]*"'"$NET_BRIDGE"'"'; then
   echo "    network '$NET_BRIDGE': present (SDN vnet)"
 elif ip link show "$NET_BRIDGE" >/dev/null 2>&1; then
   echo "    network '$NET_BRIDGE': present (linux bridge)"

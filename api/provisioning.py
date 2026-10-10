@@ -148,6 +148,13 @@ def poll_agent(store, cfg: dict, px: Proxmox, agent: dict) -> None:
         return
     if state.get("exitstatus") == "OK" or agent.get("status") != "provisioning":
         ip = px.container_ip(vmid) if vmid else None
+        if ip is None and vmid:
+            log.warning(
+                "agent %s (vmid %s) is up but its IP could not be auto-detected "
+                "(pct exec may be denied to this API token) — the home is fine; "
+                "find its IP in the Proxmox GUI.",
+                agent["id"], vmid,
+            )
         store.update(
             agent["id"],
             status="running",
