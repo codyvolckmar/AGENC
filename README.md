@@ -86,7 +86,14 @@ cp api/config.example.json api/config.json
 Installs `/opt/agenc`, generates a random `site_secret` + `admin_key`,
 starts the `agenc-api` systemd unit on `:8080`, and puts nginx in front on
 `:80`. Point your router's port-forward rules for ports 80/443 at this
-node's IP — that's the “forward the web ports to the server” part.
+node's IP — that's the "forward the web ports to the server" part.
+
+> **Config lives at `/opt/agenc/api/config.json`** — edit *that* file (it's
+> the one the service reads; edits to the repo's `api/config.json` alone
+> don't reach the running service). Re-running `deploy/deploy.sh` refreshes
+> the Proxmox token secret from `/root/.agenc-token` in place and warns
+> about leftover `REPLACE_*` / `0x0000…0000` placeholders (see
+> `tests/test_deploy_config.sh`).
 
 ### 4. Try it without a real node first
 
