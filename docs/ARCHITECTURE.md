@@ -105,6 +105,12 @@ onboot:   0  start: 1
 - **Secrets** — `site_secret` (public gate, lives in `website/js/config.js`,
   git-ignored), `admin_key` (server-side, in `config.json`, mode 600).
   Compare with `hmac.compare_digest`. Rate limit 10 requests/IP/hour.
+- **Networking** — every agent NIC attaches to the `sandbox` SDN vnet:
+  `bridge=` takes the vnet name directly in Proxmox SDN (a linux bridge of
+  the same name also works). `Proxmox.net_exists()` preflights the target
+  before each provision (via `/cluster/sdn/vnets` + `/nodes/:node/network`);
+  `/api/health` exposes `net_bridge_ok`; `proxmox/setup.sh` detects or
+  creates the vnet (`SDN_ZONE=<zone>`).
 
 ## Deployment
 
@@ -116,7 +122,8 @@ onboot:   0  start: 1
    `/root/.agenc-token`
 3. write `website/js/config.js` with the site secret
 4. install + start `agenc-api.service` (python3, `:8080`)
-5. install nginx vhost `:80 → :8080`
+5. install nginx vhost `:80 → :8080` and report the vnet preflight
+   (`net_bridge_ok` from `/api/health`)
 6. operator forwards router ports 80/443 → node IP
 
 ## Testing

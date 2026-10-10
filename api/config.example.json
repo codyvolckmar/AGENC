@@ -32,7 +32,7 @@
     "cpuunits": 1024,
     "cpulimit": null,
     "unprivileged": true,
-    "net_bridge": "vmbr0",
+    "net_bridge": "sandbox",
     "ip": "dhcp",
     "features": "nesting=1,keyctl=1",
     "ostype": "ubuntu",

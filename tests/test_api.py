@@ -127,6 +127,8 @@ class AgencyTest(unittest.TestCase):
         self.assertEqual(res["free_tier"]["limit"], 1)
         self.assertIsInstance(res["agents"]["alive"], int)
         self.assertGreater(res["cpus"], 0)
+        self.assertEqual(res["net_bridge"], "sandbox")
+        self.assertTrue(res["net_bridge_ok"])  # dry-run pretends sandbox exists
 
     def test_free_home_provisions_automatically(self):
         code, res = self.api.post("/api/agents", {

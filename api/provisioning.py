@@ -54,7 +54,18 @@ def build_params(px: Proxmox, cfg: dict, agent: dict) -> tuple[int, str, int, di
     cores = _host_cores(px, cfg)
 
     ip = c.get("ip", "dhcp")
-    net0 = f"name=eth0,bridge={c['net_bridge']},firewall=0,ip={ip}"
+    bridge = c["net_bridge"]
+    net0 = f"name=eth0,bridge={bridge},firewall=0,ip={ip}"
+
+    # Preflight: the NIC target must exist (SDN vnet or linux bridge).
+    # For Proxmox SDN vnets the `bridge=` value IS the vnet name, so
+    # 'sandbox' here attaches every agent NIC to the sandbox vnet.
+    if not px.net_exists(bridge):
+        raise ProxmoxError(
+            f"NIC target '{bridge}' not found on node '{px.node}' — create an SDN "
+            f"vnet named '{bridge}' (or a linux bridge) and re-apply SDN, or set "
+            "container.net_bridge in config.json."
+        )
 
     params: dict = {
         "vmid": vmid,
