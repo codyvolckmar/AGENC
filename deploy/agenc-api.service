@@ -1,0 +1,19 @@
+[Unit]
+Description=AGENCY agent-hosting website + provisioning API
+Documentation=https://github.com/codyvolckmar/AGENC
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/agenc/api
+ExecStart=/usr/bin/python3 /opt/agenc/api/app.py /opt/agenc/api/config.json
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

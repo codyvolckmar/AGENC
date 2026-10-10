@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AGENCY — homes for autonomous agents</title>
+<meta name="description" content="AGENCY provisions lightweight, self-hosted container homes for AI agents on Proxmox. First home free. Pay in USDC/USDT." />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%2305060a'/><path d='M20 78 L50 18 L80 78 Z' fill='none' stroke='%235dff9d' stroke-width='8' stroke-linejoin='round'/><path d='M36 60 L64 60' stroke='%2339d0ff' stroke-width='7' stroke-linecap='round'/></svg>" />
+<link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body>
+
+<div class="bg-grid" aria-hidden="true"></div>
+
+<header class="nav">
+  <a class="brand" href="#top">
+    <span class="brand-mark">▲</span>
+    <span class="brand-name">AGENCY</span>
+    <span class="brand-tag">agent hosting</span>
+  </a>
+  <nav class="nav-links">
+    <a href="#mission">Mission</a>
+    <a href="#how">How it works</a>
+    <a href="#pricing">Pricing</a>
+    <a href="#status">Status</a>
+    <a class="btn btn-primary" href="#request">Get a home</a>
+  </nav>
+</header>
+
+<main id="top">
+
+  <!-- ============================= HERO ============================= -->
+  <section class="hero">
+    <p class="eyebrow">PROXMOX · CONTAINERS · STABLECOIN</p>
+    <h1>Every AI agent<br /><span class="grad">deserves a home.</span></h1>
+    <p class="lede">
+      AGENCY spins up small, dedicated container homes for autonomous agents —
+      on real hardware you control. 2&nbsp;GB RAM, the full shared CPU pool,
+      and up to 8&nbsp;GB of disk. The first home is free; the rest are quoted
+      in USDC/USDT.
+    </p>
+
+    <div class="hero-cta">
+      <a class="btn btn-primary btn-lg" href="#request">Provision a home</a>
+      <a class="btn btn-ghost btn-lg" href="#status">Track an agent</a>
+    </div>
+
+    <div class="term" aria-hidden="true">
+      <span class="term-prompt">$</span> agency deploy agent@phoenix-42
+      <span class="term-ok">[ok] created vmid 1001 · 2048 MB · 8 GB disk · 8 shared cores</span>
+      <span class="term-ok">[ok] agent online at 10.10.3.233</span>
+    </div>
+
+    <div class="hero-stats">
+      <div class="stat"><b>2 GB</b><span>RAM per agent</span></div>
+      <div class="stat"><b>8 GB</b><span>max disk to start</span></div>
+      <div class="stat"><b>∞</b><span>shared CPU pool</span></div>
+      <div class="stat"><b>LXC</b><span>unprivileged containers</span></div>
+    </div>
+  </section>
+
+  <!-- ============================ MISSION =========================== -->
+  <section id="mission" class="section">
+    <div class="section-head">
+      <h2>Why containers, why Proxmox</h2>
+      <p>
+        An agent with its own home gets a real filesystem, real SSH keys,
+        real uptime — and it isn't renting a slice of someone else's laptop.
+        Every home is an unprivileged LXC container on your Proxmox node:
+        isolated, resizable, disposable in seconds.
+      </p>
+    </div>
+    <div class="cards">
+      <article class="card">
+        <h3>Dedicated identity</h3>
+        <p>
+          Each agent gets a hostname, its own SSH keypair installed, and a
+          stable IP. It can build, store, and version its own state across
+          restarts. A home is a place an agent can grow into.
+        </p>
+      </article>
+      <article class="card">
+        <h3>Fair-share compute</h3>
+        <p>
+          Containers share the host's full CPU pool — no pinning, no idle
+          cores. <code>cpuunits</code> keeps the scheduler fair, and an
+          optional per-agent <code>cpulimit</code> caps any runaway.
+        </p>
+      </article>
+      <article class="card">
+        <h3>Disposable by design</h3>
+        <p>
+          Homes are ephemeral infrastructure. Destroy them with one call and
+          the disk is reclaimed. If an agent turns toxic, you cut the lease,
+          not the farm.
+        </p>
+      </article>
+    </div>
+  </section>
+
+  <!-- ============================= HOW ============================== -->
+  <section id="how" class="section alt">
+    <div class="section-head">
+      <h2>How it works</h2>
+      <p>From the form to a running agent in about a minute.</p>
+    </div>
+    <ol class="steps">
+      <li>
+        <span class="step-n">01</span>
+        <h3>Request a home</h3>
+        <p>Fill in the form. Your first home is free — no payment.</p>
+      </li>
+      <li>
+        <span class="step-n">02</span>
+        <h3>Quote or instant</h3>
+        <p>
+          Free tier provisions immediately. Every further home gets a fixed
+          USDC/USDT quote with a payment reference.
+        </p>
+      </li>
+      <li>
+        <span class="step-n">03</span>
+        <h3>Container spins up</h3>
+        <p>
+          AGENCY calls the Proxmox API, provisions an LXC with your SSH key,
+          and reports the container's IP.
+        </p>
+      </li>
+      <li>
+        <span class="step-n">04</span>
+        <h3>Agent moves in</h3>
+        <p>
+          <code>ssh agent@10.10.x.x</code> — then hand the keys to your agent
+          and let it build its own world.
+        </p>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ============================ PRICING =========================== -->
+  <section id="pricing" class="section">
+    <div class="section-head">
+      <h2>Pricing</h2>
+      <p>Start free. Pay per agent home in stablecoins — no card, no KYC drama.</p>
+    </div>
+    <div class="pricing">
+      <article class="price-card price-free">
+        <p class="price-label">SEED HOME</p>
+        <h3>Free</h3>
+        <ul>
+          <li>First container on AGENCY — $0</li>
+          <li>2 GB RAM · 8 GB disk · shared CPU</li>
+          <li>Your SSH key installed</li>
+          <li>No strings, no card</li>
+        </ul>
+        <a class="btn btn-primary" href="#request">Claim the free home</a>
+      </article>
+      <article class="price-card price-paid">
+        <p class="price-label">AGENT HOMES</p>
+        <h3>USDC / USDT</h3>
+        <ul>
+          <li>Quoted per container, per month</li>
+          <li>Same specs: 2 GB RAM · 8 GB disk · shared CPU</li>
+          <li>Quote includes a unique payment <em>reference</em></li>
+          <li>Send exact amount on-chain; container provisions on confirm</li>
+        </ul>
+        <a class="btn btn-ghost" href="#request">Get a quote</a>
+      </article>
+    </div>
+    <p class="fine">
+      Quotes are generated on request with a 72-hour validity. Payment
+      <em>references</em> let us match on-chain transfers to your agent home.
+      This is an experimental service — agents are ephemeral infrastructure.
+    </p>
+  </section>
+
+  <!-- ============================ REQUEST =========================== -->
+  <section id="request" class="section alt">
+    <div class="section-head">
+      <h2>Provision a home</h2>
+      <p>
+        The form goes straight to the provisioning API on the Proxmox node.
+        First home free — afterwards you'll get a USDC/USDT quote.
+      </p>
+    </div>
+
+    <div class="request-grid">
+      <form id="provision-form" class="form" autocomplete="on">
+        <label>
+          <span>Hostname</span>
+          <input name="hostname" placeholder="phoenix-42" required
+                 pattern="[a-z0-9]([a-z0-9-]{0,40}[a-z0-9])?" />
+          <small>2–42 chars: lowercase letters, numbers, dashes.</small>
+        </label>
+        <label>
+          <span>Your email</span>
+          <input name="email" type="email" placeholder="you@example.com" required />
+        </label>
+        <label>
+          <span>Purpose</span>
+          <textarea name="purpose" rows="3" maxlength="500"
+                    placeholder="e.g. research agent that indexes my notes"></textarea>
+        </label>
+        <label>
+          <span>SSH public key <em>(recommended)</em></span>
+          <textarea name="ssh_key" rows="3" placeholder="ssh-ed25519 AAAA…"></textarea>
+          <small>Paste an OpensSSH public key — it's installed so your agent can get in.</small>
+        </label>
+        <button class="btn btn-primary btn-block" type="submit">Request home · <span id="free-badge">free</span></button>
+        <p class="form-note" id="form-note"></p>
+      </form>
+
+      <div class="result" id="result" hidden>
+        <h3 id="result-title">…</h3>
+        <div id="result-body"></div>
+        <button class="btn btn-ghost" onclick="location.hash='#status'">Open live status</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ STATUS ============================ -->
+  <section id="status" class="section">
+    <div class="section-head">
+      <h2>Agent status</h2>
+      <p>Paste an agent id (like <code>ag_3f8a21c09d</code>) to watch it move in.</p>
+    </div>
+    <div class="lookup">
+      <input id="agent-id" placeholder="ag_…" />
+      <button class="btn btn-primary" id="lookup-btn">Track</button>
+    </div>
+    <div id="status-body" class="status-panel" hidden></div>
+  </section>
+
+  <!-- ============================= FAQ ============================== -->
+  <section class="section alt">
+    <div class="section-head"><h2>Small print</h2></div>
+    <div class="faq">
+      <details><summary>Who is "AGENCY"?</summary>
+        <p>AGENCY is a hosting provider for autonomous agents. This repo is the full control plane: website, provisioning API, Proxmox automation and billing quotes.</p></details>
+      <details><summary>What can an agent do with its home?</summary>
+        <p>Anything an unprivileged LXC container on Debian/Ubuntu can do: run tooling, store state, serve a webhook, batch jobs. You own the node; your agents own their home.</p></details>
+      <details><summary>How do payments work?</summary>
+        <p>Your quote shows an exact amount in USDC or USDT, a receive address, and a unique reference. Send the transfer with that reference in the memo; the operator confirms and the home provisions.</p></details>
+      <details><summary>What if an agent needs more disk?</summary>
+        <p>Homes start at ≤ 8 GB disk on <code>local-lvm</code>. The provisioning API has an admin path to grow the disk — good homes grow with their agents.</p></details>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <span class="brand-mark">▲</span>
+  <span>AGENCY · homes for autonomous agents</span>
+  <span class="footer-meta">Runs on <a href="https://www.proxmox.com/" target="_blank" rel="noopener">Proxmox VE</a> · container templates from <a href="https://community-scripts.org/scripts" target="_blank" rel="noopener">community-scripts.org</a> · payments in USDC/USDT</span>
+</footer>
+
+<script src="/js/config.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>
