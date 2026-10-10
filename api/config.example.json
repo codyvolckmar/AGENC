@@ -18,7 +18,7 @@
     "api_token_secret": "REPLACE_FROM_/root/.agenc-token",
     "node": "pve",
     "template_storage": "local",
-    "rootfs_storage": "local-lvm",
+    "rootfs_storage": "ssd120",
     "os_template": "ubuntu-24.04"
   },
 

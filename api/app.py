@@ -269,6 +269,7 @@ class AgencyHandler(BaseHTTPRequestHandler):
                     "mem_used_gb": round((mem.get("used") or 0) / 1073741824, 1),
                     "net_bridge": bridge,
                     "net_bridge_ok": pve.net_exists(bridge),
+                    "rootfs_storage": cfg["proxmox"].get("rootfs_storage"),
                     "agents": {
                         "alive": store.alive_count(),
                         "total": len(store.all()),

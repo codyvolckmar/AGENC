@@ -132,6 +132,7 @@ class AgencyTest(unittest.TestCase):
         self.assertGreater(res["cpus"], 0)
         self.assertEqual(res["net_bridge"], "sandbox")
         self.assertTrue(res["net_bridge_ok"])  # dry-run pretends sandbox exists
+        self.assertEqual(res["rootfs_storage"], "ssd120")
 
     def test_free_home_provisions_automatically(self):
         code, res = self.api.post("/api/agents", {
