@@ -216,6 +216,13 @@ detect the vnet and can even create it: `SDN_ZONE=<zone> ./proxmox/setup.sh`).
   check is tri-state (`true`/`false`/`null`), and only a verified-absent
   result blocks provisioning. `null` proceeds and surfaces the real
   create-time error.
+- **PVE 9 token permissions model.** privsep tokens do *not* inherit their
+  user's roles — `proxmox/setup.sh` grants a **token-level ACL**
+  (`pveum aclmod / -token agenc-bot@pve!agenc -role Agenc-Operator`) and
+  creates new tokens with `--privsep 0` (the automation standard). It
+  probes permissions (`GET /nodes` requires `Sys.Audit`) after setup and
+  auto-heals either failure mode, so `token OK` in its output means the
+  token can actually drive the API.
 - **Real errors are recorded.** A failed provisioning persists the actual
   reason on the agent record (and surfaces in the UI + `error` field) — no
   more misleading `provision task missing`. Fix the cause, then
@@ -259,7 +266,8 @@ journalctl -u agenc-api -n 50
 
 | Symptom in `error` / health | Cause | Fix |
 |---|---|---|
-| `auth` / 401 from PVE, health `proxmox.auth_ok=false` | bad token in `config.json` | token lives in `/root/.agenc-token`; re-run `proxmox/setup.sh`, then `sed` it into `config.json` or re-deploy |
+| `auth` / 401 from PVE, health `proxmox.auth_ok=false` | bad token in `config.json` | token lives in `/root/.agenc-token`; re-run `proxmox/setup.sh`, then re-deploy (wires it automatically) |
+| `403 Permission check failed … Sys.Audit` (health `auth_ok=null`) | PVE 9 privsep token without its own ACL | re-run `proxmox/setup.sh` — it grants the token-level ACL and re-verifies (`token permissions OK`) |
 | `NIC target 'sandbox' not found` | vnet/bridge missing, or token lacks `SDN.Audit` | create the `sandbox` SDN vnet (setup.sh can: `SDN_ZONE=<zone>`), re-apply SDN, re-run setup.sh to refresh the role |
 | `no template matching prefix` / health `templates_available=null` | OS template not downloaded | `./proxmox/setup.sh` (downloads it) or `pveam download local <template>` |
 | `task failed` / task stuck | PVE side: check the node's task log | `/nodes/<node>/tasks` in the GUI; or `pct status <vmid>` |

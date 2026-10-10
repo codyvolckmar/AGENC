@@ -74,7 +74,7 @@ case "${1:-}" in
         ;;
     esac
     ;;
-  aclmod) exit 0 ;;
+  aclmod) echo "aclmod $*" >> "$STATE/aclmod-calls" ; exit 0 ;;
 esac
 EOF
 
@@ -107,14 +107,23 @@ EOF
 
 cat > "$BIN/curl" <<'EOF'
 #!/usr/bin/env bash
-# fake curl: simulates the PVE API auth check used by setup.sh
+# fake curl: simulates the PVE API probes used by setup.sh
 STATE="${FAKE_PVE_STATE:-/tmp/fake-pve-state}"
 mkdir -p "$STATE"
 case " $* " in
+  *"api2/json/nodes"*)
+    # permission probe: optionally fail the first /nodes call
+    if [ -n "${FAKE_CURL_NODES_FIRST:-}" ]; then
+      n="$(cat "$STATE/curl-nodes-count" 2>/dev/null || echo 0)"; n=$((n + 1)); echo "$n" > "$STATE/curl-nodes-count"
+      if [ "$n" -eq 1 ]; then echo "$FAKE_CURL_NODES_FIRST"; else echo "${FAKE_CURL_STATUS:-200}"; fi
+    else
+      echo "${FAKE_CURL_STATUS:-200}"
+    fi
+    ;;
   *"%{http_code}"*)
-    if [ "${FAKE_CURL_FAIL_ONCE:-0}" = "1" ] && [ ! -f "$STATE/curl-failed" ]; then
+    if [ -n "${FAKE_CURL_FAIL_ONCE:-}" ] && [ ! -f "$STATE/curl-failed" ]; then
       : > "$STATE/curl-failed"
-      echo 401
+      case "$FAKE_CURL_FAIL_ONCE" in 1|401) echo 401 ;; *) echo "$FAKE_CURL_FAIL_ONCE" ;; esac
     else
       echo "${FAKE_CURL_STATUS:-200}"
     fi
@@ -179,6 +188,21 @@ echo "$OUT" | grep -q "token rejected" || { echo "FAIL: no rejection detected"; 
 echo "$OUT" | grep -q "token OK after rotation" || { echo "FAIL: rotation did not verify OK"; echo "$OUT"; exit 1; }
 [ "$(cat "$WORK/agenc-token" | cut -d= -f3)" = "$(cat "$STATE/token-secret")" ] \
   || { echo "FAIL: file not updated with the fresh secret"; exit 1; }
+echo "    ok"
+
+echo "==> test 6: valid token but NO permissions (PVE 9 privsep) — expect token ACL grant"
+# token exists and authenticates, but the /nodes permission probe 403s first
+: > "$STATE/token-added"
+printf '8f212fac-779f-4875-84cf-3365b0eca9ee' > "$STATE/token-secret"
+printf 'PVEAPIToken=agenc-bot@pve!agenc=%s\n' "$(cat "$STATE/token-secret")" > "$WORK/agenc-token"
+rm -f "$STATE/curl-failed" "$STATE/curl-nodes-count" "$STATE/aclmod-calls"
+OUT="$(FAKE_CURL_NODES_FIRST=403 run_setup)"
+echo "$OUT" | grep -q "token authenticates" || { echo "FAIL: token should authenticate"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep -q "token permissions OK after ACL grant" || { echo "FAIL: no ACL-grant recovery"; echo "$OUT"; exit 1; }
+grep -q "aclmod / -token agenc-bot@pve!agenc -role Agenc-Operator" "$STATE/aclmod-calls" \
+  || { echo "FAIL: token-level ACL not granted"; cat "$STATE/aclmod-calls"; exit 1; }
+grep -q "aclmod / -user agenc-bot@pve -role Agenc-Operator" "$STATE/aclmod-calls" \
+  || { echo "FAIL: user-level ACL missing"; exit 1; }
 echo "    ok"
 
 echo
