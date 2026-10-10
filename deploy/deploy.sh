@@ -83,7 +83,11 @@ cp "$DEST/deploy/agenc-api.service" /etc/systemd/system/agenc-api.service
 sed -i "s|ExecStart=.*|ExecStart=/usr/bin/python3 $DEST/api/app.py $CFG --port $API_PORT|" \
   /etc/systemd/system/agenc-api.service
 systemctl daemon-reload
-systemctl enable --now agenc-api
+systemctl enable agenc-api >/dev/null 2>&1 || true
+# restart, not just enable: the running process caches config at startup,
+# so a config/token refresh above must be picked up
+echo "    restarting agenc-api…"
+systemctl restart agenc-api
 systemctl --no-pager --quiet is-active agenc-api \
   && echo "    agenc-api: running" \
   || { echo "!! agenc-api failed to start:"; journalctl -u agenc-api -n 20 --no-pager; exit 1; }
