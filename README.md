@@ -221,6 +221,12 @@ detect the vnet and can even create it: `SDN_ZONE=<zone> ./proxmox/setup.sh`).
   check is tri-state (`true`/`false`/`null`), and only a verified-absent
   result blocks provisioning. `null` proceeds and surfaces the real
   create-time error.
+- **Storage split (PVE 8.2+).** Creating container disks requires
+  `Datastore.AllocateSpace` on the target storage (this is
+  `Permission check failed (/storage/…, Datastore.AllocateSpace)`); older
+  PVE used `Datastore.Allocate`. `proxmox/setup.sh`'s main role set
+  includes both; on PVE < 8.2 the unknown privilege triggers the reduced-set
+  fallback automatically.
 - **PVE 9 token permissions model.** privsep tokens do *not* inherit their
   user's roles — `proxmox/setup.sh` grants a **token-level ACL**
   (`pveum aclmod / -token agenc-bot@pve!agenc -role Agenc-Operator`) and
