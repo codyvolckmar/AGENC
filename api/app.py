@@ -275,7 +275,8 @@ class AgencyHandler(BaseHTTPRequestHandler):
                     },
                     "free_tier": {
                         "used": store.free_tier_used(),
-                        "limit": cfg["billing"].get("free_tier_containers", 1),
+                        "limit": int(cfg["billing"].get("free_tier_containers", 1)),
+                        "unlimited": int(cfg["billing"].get("free_tier_containers", 1)) == 0,
                     },
                     "uptime_s": int(time.time()) - self.state["started_at"],
                 })
@@ -298,7 +299,9 @@ class AgencyHandler(BaseHTTPRequestHandler):
                     return self.error_json(409, f"hostname '{hostname}' is already in use", "conflict")
 
                 billing = cfg["billing"]
-                free_tier = store.free_tier_used() < int(billing.get("free_tier_containers", 1))
+                free_limit = int(billing.get("free_tier_containers", 1))
+                # 0 = unlimited free homes (billing disabled / dev mode)
+                free_tier = free_limit == 0 or store.free_tier_used() < free_limit
                 agent_id = new_id("ag")
                 agent = {
                     "id": agent_id,

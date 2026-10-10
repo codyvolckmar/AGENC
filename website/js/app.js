@@ -218,7 +218,8 @@
       var free = res.free_tier;
       var id = $("#free-badge");
       if (id) {
-        id.textContent = free.used >= free.limit ? "quote in USDC/USDT" : "the first home is free";
+        if (free.limit === 0) id.textContent = "all homes free right now";
+        else id.textContent = free.used >= free.limit ? "quote in USDC/USDT" : "the first home is free";
       }
     }
   }).catch(function () { /* api not up yet — form still works, server will 401 */ });

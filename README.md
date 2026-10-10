@@ -115,6 +115,10 @@ python3 api/app.py /tmp/my-demo.json # dry_run: true → fake containers
 | **Free** (`billing.free_tier_containers`, default 1) | Provisions **immediately** on request |
 | **Paid** (every home after the free slot) | Returns a **USDC/USDT quote** (amount, chain, receive address, unique `reference`); stays `quote_required` until you confirm the transfer, then provisions |
 
+> Set `billing.free_tier_containers` to **`0`** to provision **every** home for
+> free — the "billing off / dev mode" switch (health reports
+> `free_tier.unlimited: true` and the site badge changes to "all homes free").
+
 Confirm a paid transfer (operator or payment webhook):
 
 ```bash
