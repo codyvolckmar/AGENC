@@ -1,0 +1,60 @@
+{
+  "listen_host": "0.0.0.0",
+  "listen_port": 8080,
+
+  "website_dir": "../website",
+  "data_dir": "./data",
+
+  "dry_run": false,
+
+  "site_secret": "REPLACE_WITH_GENERATED_VALUE",
+  "admin_key": "REPLACE_WITH_ADMIN_KEY",
+  "rate_limit": { "per_ip_per_hour": 10 },
+
+  "proxmox": {
+    "host": "https://127.0.0.1:8006",
+    "verify_tls": false,
+    "api_token_id": "agenc-bot@pve!agenc",
+    "api_token_secret": "REPLACE_FROM_/root/.agenc-token",
+    "node": "pve",
+    "template_storage": "local",
+    "rootfs_storage": "local-lvm",
+    "os_template": "ubuntu-24.04"
+  },
+
+  "container": {
+    "vmid_start": 1000,
+    "vmid_end": 1999,
+    "memory_mb": 2048,
+    "swap_mb": 512,
+    "disk_gb": 8,
+    "cores": 0,
+    "cpuunits": 1024,
+    "cpulimit": null,
+    "unprivileged": true,
+    "net_bridge": "vmbr0",
+    "ip": "dhcp",
+    "features": "nesting=1,keyctl=1",
+    "ostype": "ubuntu",
+    "start": true,
+    "agency_ssh_key": "",
+    "ssh_port": 22,
+    "poll_interval_s": 5,
+    "create_timeout_s": 600
+  },
+
+  "billing": {
+    "free_tier_containers": 1,
+    "price_usd_per_container_per_month": 5.0,
+    "accepted_assets": ["USDC", "USDT"],
+    "chains": {
+      "USDC": { "chain": "ethereum", "network": "ERC-20" },
+      "USDT": { "chain": "ethereum", "network": "ERC-20" }
+    },
+    "receive_addresses": {
+      "USDC": "0x0000000000000000000000000000000000000000",
+      "USDT": "0x0000000000000000000000000000000000000000"
+    },
+    "quote_valid_hours": 72
+  }
+}

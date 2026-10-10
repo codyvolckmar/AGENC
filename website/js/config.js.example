@@ -1,0 +1,7 @@
+/* AGENCY client config — generated at deploy time by deploy/deploy.sh.
+   This file is git-ignored; the committed example lives in config.js.example.
+   The siteSecret must match `site_secret` in api/config.json. */
+window.AGENC_CONFIG = {
+  apiBase: "",
+  siteSecret: "REPLACE_WITH_GENERATED_VALUE"
+};
