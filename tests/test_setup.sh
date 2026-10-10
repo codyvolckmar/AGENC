@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # Functional test for proxmox/setup.sh against FAKE pve tools.
 #
-# The fake pveum reproduces Proxmox VE 9 semantics: the VM.Monitor
-# privilege no longer exists and is rejected exactly like the real error:
-#   400 Parameter verification failed. privs: invalid format - invalid
-#   privilege 'VM.Monitor'
-#
-# This test proves setup.sh now (a) installs the role without VM.Monitor
-# and (b) falls back to a reduced set when a privilege is unknown.
+# The fakes reproduce real Proxmox VE 9 behavior that has bitten installs:
+#   1. 'VM.Monitor' privilege no longer exists → role add rejects it
+#   2. 'pveum user token add' prints the secret as a BOX TABLE, not
+#      'key: … secret: …' — parsing must handle the table
+#   3. a token whose secret was never saved is an orphan that must be
+#      deleted before a fresh one can be created
 #
 # Run:  bash tests/test_setup.sh
 set -euo pipefail
@@ -26,6 +25,7 @@ STATE="${FAKE_PVE_STATE:-/tmp/fake-pve-state}"
 mkdir -p "$STATE"
 roles_file="$STATE/roles"
 applied_file="$STATE/roles-applied"
+attempts_file="$STATE/roles-attempts"
 case "${1:-}" in
   role)
     case "${2:-}" in
@@ -34,9 +34,9 @@ case "${1:-}" in
       add|modify)
         privs=""; prev=""
         for a in "$@"; do [ "$prev" = "--privs" ] && privs="$a"; prev="$a"; done
-        echo "attempt ${2}:${3} :: ${privs}" >> "$STATE/roles-attempts"
+        echo "attempt ${2}:${3} :: ${privs}" >> "$attempts_file"
         for p in $privs; do
-          if [ "$p" = "VM.Monitor" ] || [ -n "${FAKE_BAD_PRIV:-}" ] && [ "$p" = "$FAKE_BAD_PRIV" ]; then
+          if [ "$p" = "VM.Monitor" ] || { [ -n "${FAKE_BAD_PRIV:-}" ] && [ "$p" = "$FAKE_BAD_PRIV" ]; }; then
             echo "400 Parameter verification failed. privs: invalid format - invalid privilege '$p'" >&2
             exit 1
           fi
@@ -50,16 +50,26 @@ case "${1:-}" in
     case "${2:-}" in
       add) exit 0 ;;
       token)
-        case "${3:-}" in
+        cmd="${3:-}"; u="${4:-}"; t="${5:-}"
+        case "$cmd" in
           add)
             if [ -f "$STATE/token-added" ]; then
-              # real pveum refuses to re-create an existing token (500)
-              echo "token already exists" >&2
+              echo "pveum user token add failed: token already exists" >&2
               exit 1
             fi
             : > "$STATE/token-added"
-            echo "key: agenc  secret: $(tr -dc 'a-f0-9' </dev/urandom | head -c 32)" ;;
-          list) exit 0 ;;
+            echo "$t" > "$STATE/token-id"
+            SECRET="$(tr -dc 'a-f0-9' </dev/urandom | head -c 32)"
+            echo "$SECRET" > "$STATE/token-secret"
+            # PVE 9 prints the secret exactly like this box table
+            printf '┌──────────────┬──────────────────────────────────────┐\n│ key          │ value                                │\n╞══════════════╪══════════════════════════════════════╡\n│ full-tokenid │ %s!%s                  │\n├──────────────┼──────────────────────────────────────┤\n│ info         │ {"privsep":"1"}                      │\n├──────────────┼──────────────────────────────────────┤\n│ value        │ %s │\n└──────────────┴──────────────────────────────────────┘\n' "$u" "$t" "$SECRET"
+            ;;
+          list)
+            if [ -f "$STATE/token-added" ]; then
+              TID="$(cat "$STATE/token-id" 2>/dev/null || echo 'agenc')"
+              printf '┌─────────┬────────┐\n│ tokenid │ expire │\n╞═════════╪════════╡\n│ %s      │ 0      │\n└─────────┴────────┘\n' "$TID"
+            fi
+            ;;
         esac
         ;;
     esac
@@ -70,12 +80,18 @@ EOF
 
 cat > "$BIN/pvesh" <<'EOF'
 #!/usr/bin/env bash
+STATE="${FAKE_PVE_STATE:-/tmp/fake-pve-state}"
+mkdir -p "$STATE"
 case "${1:-}" in
   get)
     case "${2:-}" in
       /cluster/sdn/vnets) printf '[ { "vnet": "sandbox", "zone": "localnet" } ]\n' ;;
       /nodes/*/status) printf '{ "status": "online", "cpuinfo": { "cpus": 8 } }\n' ;;
     esac ;;
+  delete)
+    # pvesh delete /access/users/<u>/tokens/<t> — removes the orphan
+    rm -f "$STATE/token-added" "$STATE/token-secret"
+    exit 0 ;;
   create|put|post) exit 0 ;;
 esac
 EOF
@@ -97,29 +113,41 @@ run_setup() {
   bash "$ROOT/proxmox/setup.sh" 2>&1
 }
 
-echo "==> test 1: install on PVE 9 (VM.Monitor rejected) — expect success + fallback-free role"
+echo "==> test 1: fresh install, PVE 9 box-table token output — parse must succeed"
 OUT="$(run_setup)"
-echo "$OUT" | grep -q "role 'Agenc-Operator'" || { echo "FAIL: role line missing"; echo "$OUT"; exit 1; }
-grep -q "add:Agenc-Operator" "$STATE/roles-applied" || { echo "FAIL: role was never created"; echo "$OUT"; exit 1; }
-grep -q "VM.Monitor" "$STATE/roles-applied" && { echo "FAIL: VM.Monitor ended up in the role"; exit 1; }
-[ -s "$WORK/agenc-token" ] || { echo "FAIL: token file not written"; exit 1; }
-echo "$OUT" | grep -q "sandbox': present (SDN vnet)" || { echo "FAIL: vnet sanity check didn't report sandbox"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep -q "token written to" || { echo "FAIL: token secret not parsed/written"; echo "$OUT"; exit 1; }
+grep -q "add:Agenc-Operator" "$STATE/roles-applied" || { echo "FAIL: role never created"; echo "$OUT"; exit 1; }
+grep -q "VM.Monitor" "$STATE/roles-applied" && { echo "FAIL: VM.Monitor in role"; exit 1; }
+[ -s "$WORK/agenc-token" ] || { echo "FAIL: token file empty"; exit 1; }
+grep -q "$(cat "$STATE/token-secret")" "$WORK/agenc-token" || { echo "FAIL: saved secret != table value"; exit 1; }
+echo "$OUT" | grep -q "sandbox': present (SDN vnet)" || { echo "FAIL: vnet not detected"; echo "$OUT"; exit 1; }
 echo "    ok"
 
 echo "==> test 2: privilege unknown to this PVE (VM.Config.HWType) — expect fallback to reduced set"
-rm -f "$STATE/roles" "$STATE/roles-applied" "$STATE/roles-attempts" "$WORK/agenc-token" "$STATE/token-added"
+rm -f "$STATE/roles" "$STATE/roles-applied" "$STATE/roles-attempts" "$WORK/agenc-token" "$STATE/token-added" "$STATE/token-secret"
 OUT="$(FAKE_BAD_PRIV="VM.Config.HWType" run_setup)"
-echo "$OUT" | grep -q "reduced privileges" || { echo "FAIL: no reduced-privileges fallback note"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep -q "reduced privileges" || { echo "FAIL: no reduced-privileges note"; echo "$OUT"; exit 1; }
 LINES="$(grep -c '^attempt' "$STATE/roles-attempts")"
 [ "$LINES" -ge 2 ] || { echo "FAIL: expected a retry on the reduced set"; echo "$OUT"; exit 1; }
 LAST="$(tail -1 "$STATE/roles-attempts")"
-echo "$LAST" | grep -q "VM.Config.HWType" && { echo "FAIL: bad privilege present in final role"; exit 1; }
+echo "$LAST" | grep -q "VM.Config.HWType" && { echo "FAIL: bad privilege in final role"; exit 1; }
 [ -s "$WORK/agenc-token" ] || { echo "FAIL: token file not written"; exit 1; }
 echo "    ok"
 
-echo "==> test 3: rerun (role exists) is idempotent — modify path works"
+echo "==> test 3: rerun (token exists + saved file) — idempotent reuse"
 OUT="$(run_setup)"
 echo "$OUT" | grep -q "token already exists — reusing" || { echo "FAIL: rerun should reuse the token"; echo "$OUT"; exit 1; }
+echo "    ok"
+
+echo "==> test 4: orphaned token (exists, secret never saved) — delete + recreate"
+rm -f "$STATE/token-added" "$STATE/token-secret" "$WORK/agenc-token"
+: > "$STATE/token-added"     # simulate the user's failed first run: token exists, no saved secret
+OUT="$(run_setup)"
+echo "$OUT" | grep -q "secret was never saved" || { echo "FAIL: no orphan notice"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep -q "token written to" || { echo "FAIL: token not recreated"; echo "$OUT"; exit 1; }
+[ -s "$WORK/agenc-token" ] || { echo "FAIL: token file missing after recovery"; exit 1; }
+SECRET_AFTER="$(cat "$WORK/agenc-token" | cut -d= -f3)"
+[ "$SECRET_AFTER" = "$(cat "$STATE/token-secret")" ] || { echo "FAIL: recreated secret mismatch"; exit 1; }
 echo "    ok"
 
 echo

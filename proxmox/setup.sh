@@ -6,7 +6,9 @@
 #   Usage:  NODE=pve STORAGE=local ./proxmox/setup.sh
 #
 # The token secret is written (mode 600) to /root/.agenc-token — deploy.sh
-# reads it from there when generating api/config.json.
+# reads it from there when generating api/config.json. Safe to re-run:
+# it heals partially-failed previous runs (e.g. an orphaned token whose
+# secret was never saved, because pveum only prints it once).
 set -euo pipefail
 
 TOKEN_USER="${TOKEN_USER:-agenc-bot@pve}"
@@ -63,27 +65,95 @@ pveum user add "$TOKEN_USER" 2>/dev/null || true
 pveum aclmod / -user "$TOKEN_USER" -role "$ROLE"
 
 # --- 3. API token (secret is only printed once) --------------------------
+# pveum prints the fresh secret in different shapes across versions:
+#   PVE 7/8:  key: <id>  secret: <hex>
+#   PVE 9:    a box table with a 'value' row, e.g.
+#             │ value        │ 594f25c7-c9a5-4844-8dc4-e82a56369d2d │
+# parse_token_secret() understands the table, key:value lines and JSON.
+parse_token_secret() {
+  python3 - "$1" <<'PY'
+import json, re, sys
+raw = open(sys.argv[1], encoding="utf-8").read() if sys.argv[1:] else ""
+data = None
+try:
+    data = json.loads(raw)
+except json.JSONDecodeError:
+    pass
+if isinstance(data, list):
+    for row in data:
+        if isinstance(row, dict) and row.get("key") in ("value", "secret"):
+            print(str(row.get("value") or row.get("secret") or "")); sys.exit(0)
+elif isinstance(data, dict):
+    if isinstance(data.get("value"), str) and data["value"]:
+        print(data["value"]); sys.exit(0)
+    for row in data.values():
+        if isinstance(row, dict) and row.get("key") == "value":
+            print(str(row.get("value") or "")); sys.exit(0)
+# PVE 9 box table (uses │ U+2502 / ├┼ U+251C,256A). Split each line on the
+# cell separators and read the row whose first cell is 'value':
+#   │ value        │ 594f25c7-… │   →   cells == ['', ' value ', ' … ', '']
+for line in raw.splitlines():
+    cells = [c.strip() for c in re.split(r"[│|╪┼]", line)]
+    if len(cells) >= 3 and cells[1] in ("value", "secret"):
+        print(cells[2]); sys.exit(0)
+# plain text: 'secret = xxx' or 'secret: xxx'
+m = re.search(r"secret\s*[=:]\s*([^\s'\"|]+)", raw)
+if m:
+    print(m.group(1).strip()); sys.exit(0)
+sys.exit(1)
+PY
+}
+
+create_token() {
+  local out="$1"
+  if pveum user token add "$TOKEN_USER" "$TOKEN_ID" --privsep 1 >"$out" 2>&1; then
+    TOKEN_SECRET="$(parse_token_secret "$out")" || TOKEN_SECRET=""
+    if [ -z "$TOKEN_SECRET" ]; then
+      echo "!! Could not parse the token secret from pveum output:" >&2
+      cat "$out" >&2
+      return 1
+    fi
+    printf 'PVEAPIToken=%s!%s=%s\n' "$TOKEN_USER" "$TOKEN_ID" "$TOKEN_SECRET" > "$TOKEN_FILE"
+    chmod 600 "$TOKEN_FILE"
+    echo "    token written to $TOKEN_FILE"
+    return 0
+  fi
+  return 1
+}
+
+token_exists() {
+  pveum user token list "$TOKEN_USER" 2>/dev/null | grep -qE "$TOKEN_ID"
+}
+
 echo "==> Ensuring API token '${TOKEN_ID}'"
 TMP_OUT="$(mktemp)"
-if pveum user token add "$TOKEN_USER" "$TOKEN_ID" --privsep 1 >"$TMP_OUT" 2>&1; then
-  # PVE 8 prints: key: <id>  secret: <hex>
-  TOKEN_SECRET="$(grep -oP 'secret[=:]\s*\K[^\s"]+' "$TMP_OUT" | head -1 || true)"
-  if [ -z "${TOKEN_SECRET:-}" ]; then
-    echo "!! Could not parse the token secret from pveum output:" >&2
-    cat "$TMP_OUT" >&2
-    exit 1
-  fi
-  printf 'PVEAPIToken=%s!%s=%s\n' "$TOKEN_USER" "$TOKEN_ID" "$TOKEN_SECRET" > "$TOKEN_FILE"
-  chmod 600 "$TOKEN_FILE"
-  echo "    token written to $TOKEN_FILE"
-else
+if create_token "$TMP_OUT"; then
+  :
+elif token_exists; then
   if [ -s "$TOKEN_FILE" ]; then
     echo "    token already exists — reusing $TOKEN_FILE"
   else
-    echo "!! 'pveum user token add' failed and no saved token found:" >&2
-    cat "$TMP_OUT" >&2
-    exit 1
+    echo "!! token '$TOKEN_ID' exists but its secret was never saved (pveum shows it once)."
+    echo "   Deleting it so a fresh secret can be created…"
+    if pvesh delete "/access/users/$TOKEN_USER/tokens/$TOKEN_ID" 2>/dev/null; then
+      if create_token "$TMP_OUT"; then
+        :
+      else
+        echo "!! recreate failed:" >&2
+        cat "$TMP_OUT" >&2
+        exit 1
+      fi
+    else
+      echo "!! could not delete the orphaned token. Delete it yourself, then re-run:" >&2
+      echo "   pvesh delete /access/users/$TOKEN_USER/tokens/$TOKEN_ID" >&2
+      echo "   (or GUI: Datacenter -> Permissions -> API Tokens -> delete '$TOKEN_ID')" >&2
+      exit 1
+    fi
   fi
+else
+  echo "!! 'pveum user token add' failed and no saved token found:" >&2
+  cat "$TMP_OUT" >&2
+  exit 1
 fi
 rm -f "$TMP_OUT"
 
