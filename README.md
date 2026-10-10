@@ -191,6 +191,14 @@ detect the vnet and can even create it: `SDN_ZONE=<zone> ./proxmox/setup.sh`).
 - PVE auth is a **least-privilege API token** (role `Agenc-Operator`, no
   root password auth). `verify_tls: false` is the default because PVE ships
   self-signed — flip it on once you control the CA.
+- **PVE 8 & 9 compatible.** Proxmox VE 9 removed the `VM.Monitor` privilege
+  (that's the `invalid privilege 'VM.Monitor'` error some guides produce).
+  `proxmox/setup.sh` no longer requests it; if your pveum rejects any
+  optional privilege it automatically falls back to a reduced set, so the
+  script works on PVE 7.4 → 9.x.
+- **Auto-IP is best-effort.** The API tries `pct exec` to read the
+  container's IP after creation. Tokens are sometimes denied that call —
+  the home still provisions; grab the IP from the Proxmox GUI in that case.
 - `dry_run: true` in config = **no containers are created**; every Proxmox
   call is logged instead. Safe for demos and tests.
 - Public provisioning is gated by `site_secret` (embedded client-side —

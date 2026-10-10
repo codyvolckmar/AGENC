@@ -60,8 +60,10 @@ marks the record `destroyed`; a destroyed free home gives its slot back.
 ## Proxmox integration
 
 Authentication is an **API token** (`PVEAPIToken=<user!id>=<secret>`), created
-by `proxmox/setup.sh` with the minimal privilege set
-(`VM.Allocate … Datastore.* Sys.Audit` on `/`). Calls used:
+by `proxmox/setup.sh` with a privilege set that is **intersection-safe across
+PVE 8 and 9** — PVE 9 removed `VM.Monitor`, so it is never requested; if
+`pveum` rejects any privilege, the script retries with a reduced set
+(verified by `tests/test_setup.sh` against a PVE-9-semantics fake). Calls used:
 
 | Purpose | Endpoint |
 |---|---|
@@ -70,7 +72,7 @@ by `proxmox/setup.sh` with the minimal privilege set
 | pick template | `GET /nodes/:node/storage/:storage/content?content=vztmpl` |
 | create container | `POST /nodes/:node/lxc` (params in `provisioning.build_params`) |
 | poll async task | `GET /nodes/:node/tasks/:upid/status` |
-| container IP | `POST /nodes/:node/lxc/:vmid/exec` (`hostname -I`) |
+| container IP | `POST /nodes/:node/lxc/:vmid/exec` (`hostname -I`) — best-effort: some tokens are denied exec; fall back to the GUI |
 | destroy | `DELETE /nodes/:node/lxc/:vmid` |
 
 ### The LXC payload (business rules encoded here)
