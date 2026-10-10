@@ -33,6 +33,7 @@
     "cpulimit": null,
     "unprivileged": true,
     "net_bridge": "sandbox",
+    "net_preflight": true,
     "ip": "dhcp",
     "features": "nesting=1,keyctl=1",
     "ostype": "ubuntu",
