@@ -97,7 +97,7 @@
       row("hostname", agent.hostname) +
       row("specs", agent.memory_mb + " MB RAM · " + agent.disk_gb + " GB disk · " + (agent.cores ? agent.cores : "—") + " shared cores") +
       (agent.vmid ? row("vmid", agent.vmid) : "") +
-      (agent.ip ? row("ip", agent.ip + '  <code style="border:none;background:none;padding:0;">ssh agent@' + esc(agent.ip) + "</code>") : "") +
+      (agent.ip ? row("ip", agent.ip + '  <code style="border:none;background:none;padding:0;">ssh root@' + esc(agent.ip) + "</code>") : "") +
       "</dl>";
     return (
       '<h3>' + statusDot(agent.status) + " " + esc(agent.hostname) + "</h3>" +

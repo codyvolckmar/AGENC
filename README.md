@@ -167,6 +167,7 @@ curl -X POST http://NODE/api/agents \
 | `memory_mb` | `2048` | 2 GB RAM per agent |
 | `swap_mb` | `512` | 512 MB swap |
 | `disk_gb` | `8` | **max 8 GB rootfs** on `rootfs_storage` |
+| `rootfs_storage` | `ssd120` | storage pool the agent disk lands on (`pvesm status` for your ids; example tuned for AGENCY's fast pool) |
 | `cores` | `0` | `0` ⇒ use *all* host cores, shared: every agent can burst on any core (no pinning); `cpuunits` (1024) keeps the scheduler fair; set `cpulimit` to cap one agent |
 | `unprivileged` | `true` | unprivileged LXC (the community-scripts default) |
 | `net_bridge` | `sandbox` | the **SDN vnet** (or linux bridge) every agent NIC attaches to — `bridge=sandbox` in net0 |
@@ -176,6 +177,24 @@ curl -X POST http://NODE/api/agents \
 
 Every home gets `tags: agenc` and a `description` with the agent id so you
 can see them in the Proxmox UI.
+
+### Access & the root account
+
+Templates are provisioned **key-only**: there is no root password. The
+public key from the request form is installed for `root` (and an optional
+`container.agency_ssh_key` is added too), so:
+
+```bash
+ssh -i <your-key> root@<container-ip>
+```
+
+If you must have a password (e.g. for a demo), set one from the host after
+creation:
+
+```bash
+pct enter <vmid> -- chpasswd   # set root password interactively
+# or: pct exec <vmid> -- bash -c "echo root:CHANGE-ME | chpasswd"
+```
 
 ### Networking — the `sandbox` vnet
 
@@ -282,6 +301,7 @@ journalctl -u agenc-api -n 50
 | `403 Permission check failed … Sys.Audit` (health `auth_ok=null`) | PVE 9 privsep token without its own ACL | re-run `proxmox/setup.sh` — it grants the token-level ACL and re-verifies (`token permissions OK`) |
 | ⚠ `bad or missing X-Agency-Secret` on the website | website secret ≠ API secret (a deploy regenerated it) | re-run `./deploy/deploy.sh .` — it now **reuses** the API's secret for the site |
 | `net_bridge_ok=false` but your bridge/vnet exists | raw kernel bridge not defined in `/etc/network/interfaces` (PVE API can't list it) | define it in PVE (Node → Network → Create Linux Bridge / SDN), **or** set `container.net_preflight: false` in config.json if you manage that network yourself |
+| `Connection refused` on :8080 from the internet (works on node/LAN) | port-forward, hairpin-NAT or firewall on your router/host | `ss -tlnp | grep 8080` on the node; test from another LAN device at `http://10.10.1.179:8080`; test from mobile data (WAN) — consumer routers usually don't hairpin; prefer nginx on :80 instead |
 | `NIC target 'sandbox' not found` | vnet/bridge missing, or token lacks `SDN.Audit` | create the `sandbox` SDN vnet (setup.sh can: `SDN_ZONE=<zone>`), re-apply SDN, re-run setup.sh to refresh the role |
 | `no template matching prefix` / health `templates_available=null` | OS template not downloaded | `./proxmox/setup.sh` (downloads it) or `pveam download local <template>` |
 | `task failed` / task stuck | PVE side: check the node's task log | `/nodes/<node>/tasks` in the GUI; or `pct status <vmid>` |
