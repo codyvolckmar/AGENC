@@ -63,6 +63,11 @@ fi
 echo "==> Ensuring user '${TOKEN_USER}' with role on /"
 pveum user add "$TOKEN_USER" 2>/dev/null || true
 pveum aclmod / -user "$TOKEN_USER" -role "$ROLE"
+# PVE 9: privsep tokens do NOT inherit the user's roles — the token needs
+# its own ACL entry (supported since PVE 7.2; aclmod errors on pre-token PVE).
+pveum aclmod / -token "$TOKEN_USER!$TOKEN_ID" -role "$ROLE" 2>/dev/null \
+  || pveum aclmod / -tokens "$TOKEN_USER!$TOKEN_ID" -roles "$ROLE" 2>/dev/null \
+  || echo "    !! could not grant token-level ACL (old PVE?) — tokens there inherit user roles, continuing"
 
 # --- 3. API token (secret is only printed once) --------------------------
 # pveum prints the fresh secret in different shapes across versions:
@@ -106,7 +111,10 @@ PY
 
 create_token() {
   local out="$1"
-  if pveum user token add "$TOKEN_USER" "$TOKEN_ID" --privsep 1 >"$out" 2>&1; then
+  # privsep 0: the token inherits the user's roles (works on every PVE
+  # version; the ecosystem standard for automation). We ALSO grant a
+  # token-level ACL above, so manually-created privsep-1 tokens work too.
+  if pveum user token add "$TOKEN_USER" "$TOKEN_ID" --privsep 0 >"$out" 2>&1; then
     TOKEN_SECRET="$(parse_token_secret "$out")" || TOKEN_SECRET=""
     if [ -z "$TOKEN_SECRET" ]; then
       echo "!! Could not parse the token secret from pveum output:" >&2
@@ -157,30 +165,40 @@ else
 fi
 rm -f "$TMP_OUT"
 
-# --- 3b. verify the saved token actually authenticates ----------------------
+# --- 3b. verify the saved token authenticates AND has permissions ----------
 PVE_API="${PVE_API:-https://127.0.0.1:8006}"
-pve_api_status() {  # => HTTP code of GET /version with the saved token, or 'none'
+pve_auth_code() {  # => HTTP code of GET /version (unauthenticated-ok endpoint)
   [ -s "$TOKEN_FILE" ] || { echo none; return; }
   curl -sk -o /dev/null -w '%{http_code}' \
     -H "Authorization: $(cat "$TOKEN_FILE")" \
     "$PVE_API/api2/json/version" 2>/dev/null || echo none
 }
+pve_perm_code() {  # => HTTP code of GET /nodes (requires Sys.Audit = real perms)
+  [ -s "$TOKEN_FILE" ] || { echo none; return; }
+  curl -sk -o /dev/null -w '%{http_code}' \
+    -H "Authorization: $(cat "$TOKEN_FILE")" \
+    "$PVE_API/api2/json/nodes" 2>/dev/null || echo none
+}
+grant_token_acl() {
+  pveum aclmod / -token "$TOKEN_USER!$TOKEN_ID" -role "$ROLE" 2>/dev/null \
+    || pveum aclmod / -tokens "$TOKEN_USER!$TOKEN_ID" -roles "$ROLE" 2>/dev/null \
+    || return 1
+}
+
 echo "==> Verifying API token against PVE"
-CODE="$(pve_api_status)"
-if [ "$CODE" = "200" ]; then
-  echo "    token OK — PVE accepts it"
-else
+CODE="$(pve_auth_code)"
+if [ "$CODE" != "200" ]; then
   echo "!! token rejected (HTTP ${CODE:-none}) — the saved secret no longer matches PVE."
   echo "   Rotating: deleting the stale token and creating a fresh one."
   if pvesh delete "/access/users/$TOKEN_USER/tokens/$TOKEN_ID" 2>/dev/null; then
     rm -f "$TOKEN_FILE"
     ROT_OUT="$(mktemp)"
     if create_token "$ROT_OUT"; then
-      CODE2="$(pve_api_status)"
-      if [ "$CODE2" = "200" ]; then
+      CODE="$(pve_auth_code)"
+      if [ "$CODE" = "200" ]; then
         echo "    token OK after rotation"
       else
-        echo "!! still rejected (HTTP ${CODE2:-none}) — verify PVE reachable:"
+        echo "!! still rejected (HTTP ${CODE:-none}) — verify PVE reachable:"
         echo "   curl -sk $PVE_API/api2/json/version   (and check the date/clock on this node)" >&2
         exit 1
       fi
@@ -196,6 +214,42 @@ else
     echo "   (or GUI: Datacenter -> Permissions -> API Tokens -> delete '$TOKEN_ID')" >&2
     exit 1
   fi
+else
+  echo "    token authenticates"
+fi
+
+PCODE="$(pve_perm_code)"
+if [ "$PCODE" = "200" ]; then
+  echo "    token permissions OK — PVE grants the role"
+elif [ "$PCODE" = "403" ]; then
+  echo "!! token authenticates but has NO permissions (PVE 9 privsep tokens don't"
+  echo "   inherit the user's role). Granting the token its own ACL…"
+  if grant_token_acl; then
+    PCODE2="$(pve_perm_code)"
+    if [ "$PCODE2" = "200" ]; then
+      echo "    token permissions OK after ACL grant"
+    else
+      echo "!! still no permissions (HTTP ${PCODE2:-none}) — rotating to a non-privsep token"
+      pvesh delete "/access/users/$TOKEN_USER/tokens/$TOKEN_ID" 2>/dev/null && rm -f "$TOKEN_FILE" \
+        || { echo "!! could not delete token — do it manually, then re-run setup.sh" >&2; exit 1; }
+      ROT_OUT="$(mktemp)"
+      if create_token "$ROT_OUT" && [ "$(pve_perm_code)" = "200" ]; then
+        echo "    token permissions OK after rotation"
+      else
+        echo "!! rotation still failing — check: pveum role list, pveum acl list" >&2
+        cat "$ROT_OUT" >&2
+        exit 1
+      fi
+      rm -f "$ROT_OUT"
+    fi
+  else
+    echo "!! could not grant the token-level ACL on this PVE — check manually:" >&2
+    echo "   pveum aclmod / -token $TOKEN_USER!$TOKEN_ID -role $ROLE" >&2
+    exit 1
+  fi
+else
+  echo "!! permission probe failed (HTTP ${PCODE:-none}) — check PVE reachability" >&2
+  exit 1
 fi
 
 # --- 4. base template ----------------------------------------------------
