@@ -52,6 +52,11 @@ watchdog thread polls PVE task every poll_interval_s
         │  GET /nodes/:node/tasks/:upid/status
         ├─ running  → keep polling
         └─ stopped/OK → fetch IP (pct exec "hostname -I") → status = running
+
+error path: if the PVE call fails (bad token, missing template, denied
+permission…), `start_provision` records the REAL reason on the agent
+record (status = error, error = message). The operator fixes the cause
+and calls `POST /api/agents/:id/retry` (admin) to re-run provisioning.
 ```
 
 Destroy (`POST /api/agents/:id/destroy`, admin key) deletes the LXC and
@@ -63,7 +68,9 @@ Authentication is an **API token** (`PVEAPIToken=<user!id>=<secret>`), created
 by `proxmox/setup.sh` with a privilege set that is **intersection-safe across
 PVE 8 and 9** — PVE 9 removed `VM.Monitor`, so it is never requested; if
 `pveum` rejects any privilege, the script retries with a reduced set
-(verified by `tests/test_setup.sh` against a PVE-9-semantics fake). Calls used:
+(verified by `tests/test_setup.sh` against a PVE-9-semantics fake). The
+role includes **`SDN.Audit` + `SDN.Use`** so the API can inspect the
+`sandbox` vnet and attach NICs to it. Calls used:
 
 | Purpose | Endpoint |
 |---|---|
@@ -109,10 +116,13 @@ onboot:   0  start: 1
   Compare with `hmac.compare_digest`. Rate limit 10 requests/IP/hour.
 - **Networking** — every agent NIC attaches to the `sandbox` SDN vnet:
   `bridge=` takes the vnet name directly in Proxmox SDN (a linux bridge of
-  the same name also works). `Proxmox.net_exists()` preflights the target
-  before each provision (via `/cluster/sdn/vnets` + `/nodes/:node/network`);
-  `/api/health` exposes `net_bridge_ok`; `proxmox/setup.sh` detects or
-  creates the vnet (`SDN_ZONE=<zone>`).
+  the same name also works). `Proxmox.net_exists()` is **tri-state**:
+  `true` (verified present via `/cluster/sdn/vnets` + `/nodes/:node/network`),
+  `false` (verified absent — blocks provisioning), or `null` (cannot tell,
+  e.g. token lacks SDN privileges — proceeds optimistically).
+  `/api/health` exposes `net_bridge_ok` plus `proxmox.reachable`,
+  `proxmox.auth_ok` and `templates_available`; `deploy/deploy.sh` prints
+  them on deploy and warns about `REPLACE_*`/zeroed payment placeholders.
 
 ## Deployment
 

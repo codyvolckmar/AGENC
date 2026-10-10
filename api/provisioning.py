@@ -60,11 +60,18 @@ def build_params(px: Proxmox, cfg: dict, agent: dict) -> tuple[int, str, int, di
     # Preflight: the NIC target must exist (SDN vnet or linux bridge).
     # For Proxmox SDN vnets the `bridge=` value IS the vnet name, so
     # 'sandbox' here attaches every agent NIC to the sandbox vnet.
-    if not px.net_exists(bridge):
+    check = px.net_exists(bridge)
+    if check is False:
         raise ProxmoxError(
             f"NIC target '{bridge}' not found on node '{px.node}' — create an SDN "
-            f"vnet named '{bridge}' (or a linux bridge) and re-apply SDN, or set "
-            "container.net_bridge in config.json."
+            f"vnet named '{bridge}' (or a linux bridge), re-apply SDN, and retry. "
+            "(or set container.net_bridge in config.json)"
+        )
+    if check is None:
+        log.warning(
+            "could not verify NIC target '%s' on %s (token may lack SDN.Audit, or "
+            "SDN undetermined) — continuing; create will surface any permission error",
+            bridge, px.node,
         )
 
     params: dict = {
@@ -104,19 +111,27 @@ def build_params(px: Proxmox, cfg: dict, agent: dict) -> tuple[int, str, int, di
 
 
 def start_provision(store, cfg: dict, px: Proxmox, agent: dict) -> str | None:
-    """Create the LXC and return the task UPID. Retries vmid selection on race."""
-    last_error = None
+    """Create the LXC and return the task UPID. Retries vmid selection on race.
+
+    Every failure path records the REAL reason on the agent record before
+    re-raising, so the UI/API never shows a misleading "task missing".
+    """
+    last_error: ProxmoxError | None = None
     for _attempt in range(3):
-        vmid, template, cores, params = build_params(px, cfg, agent)
         try:
+            vmid, template, cores, params = build_params(px, cfg, agent)
             upid = px.create_lxc(params)
             break
         except ProxmoxError as exc:
             last_error = exc
-            log.warning("create attempt failed (vmid=%s): %s", vmid, exc)
+            log.warning("provision attempt %d failed: %s", _attempt + 1, exc)
             time.sleep(1)
     else:
-        store.update(agent["id"], status="error", error=f"provision failed: {last_error}")
+        err = f"provision failed: {last_error or 'unknown error'}"
+        store.update(
+            agent["id"], status="error", error=err,
+            task=None, vmid=agent.get("vmid"),
+        )
         raise last_error  # type: ignore[misc]
 
     store.update(
