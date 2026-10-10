@@ -244,6 +244,30 @@ class AgencyTest(unittest.TestCase):
         self.assertIsNone(res["agent"].get("error"))
         self.wait_status(agent["id"], "running")
 
+    def test_unlimited_free_tier_mode(self):
+        """free_tier_containers: 0 = billing off — every home provisions instantly."""
+        with tempfile.TemporaryDirectory(prefix="agenc-free-") as d:
+            cfg = make_config(d)
+            cfg["billing"]["free_tier_containers"] = 0
+            srv = build_server(cfg)
+            thread = threading.Thread(target=srv.serve_forever, daemon=True)
+            thread.start()
+            api = Api(f"http://127.0.0.1:{srv.server_address[1]}")
+            try:
+                code, res = api.post("/api/agents", {
+                    "hostname": "free-forever-1", "email": "f@example.com",
+                }, secret=SITE_SECRET)
+                self.assertEqual(code, 201)
+                self.assertTrue(res["agent"]["free_tier"])
+                self.assertIn(res["agent"]["status"], ("provisioning", "running"))
+                self.assertIsNone(res["agent"].get("quote"))
+                code, health = api.get("/api/health")
+                self.assertEqual(code, 200)
+                self.assertTrue(health["free_tier"]["unlimited"])
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
     def test_public_view_never_leaks_ssh_key(self):
         _, res = self.api.get("/api/agents")
         for agent in res["agents"]:
