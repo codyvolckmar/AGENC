@@ -60,19 +60,25 @@ def build_params(px: Proxmox, cfg: dict, agent: dict) -> tuple[int, str, int, di
     # Preflight: the NIC target must exist (SDN vnet or linux bridge).
     # For Proxmox SDN vnets the `bridge=` value IS the vnet name, so
     # 'sandbox' here attaches every agent NIC to the sandbox vnet.
-    check = px.net_exists(bridge)
-    if check is False:
-        raise ProxmoxError(
-            f"NIC target '{bridge}' not found on node '{px.node}' — create an SDN "
-            f"vnet named '{bridge}' (or a linux bridge), re-apply SDN, and retry. "
-            "(or set container.net_bridge in config.json)"
-        )
-    if check is None:
-        log.warning(
-            "could not verify NIC target '%s' on %s (token may lack SDN.Audit, or "
-            "SDN undetermined) — continuing; create will surface any permission error",
-            bridge, px.node,
-        )
+    # Set net_preflight: false to skip the existence check (e.g. when the
+    # bridge is a raw kernel device PVE's API cannot list).
+    if c.get("net_preflight", True):
+        check = px.net_exists(bridge)
+        if check is False:
+            raise ProxmoxError(
+                f"NIC target '{bridge}' not found on node '{px.node}' — create an SDN "
+                f"vnet named '{bridge}' (or a linux bridge in PVE: Node -> Network), "
+                "or set container.net_preflight=false in config.json if you manage "
+                "that network yourself. Then retry."
+            )
+        if check is None:
+            log.warning(
+                "could not verify NIC target '%s' on %s (token may lack SDN.Audit, or "
+                "SDN undetermined) — continuing; create will surface any permission error",
+                bridge, px.node,
+            )
+    else:
+        log.info("net_preflight disabled — attaching NICs to '%s' without an existence check", bridge)
 
     params: dict = {
         "vmid": vmid,

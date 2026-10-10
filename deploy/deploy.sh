@@ -38,11 +38,11 @@ else
 fi
 
 # --- 2. generate secrets + config ------------------------------------------
-SITE_SECRET="$(openssl rand -hex 24)"
-ADMIN_KEY="$(openssl rand -hex 24)"
 CFG="$DEST/api/config.json"
 
 if [ ! -f "$CFG" ]; then
+  SITE_SECRET="$(openssl rand -hex 24)"
+  ADMIN_KEY="$(openssl rand -hex 24)"
   say "Generating $CFG from example (dry_run=false)"
   "$PYTHON" - "$CFG" "$SITE_SECRET" "$ADMIN_KEY" "$API_HOST" "$API_PORT" "$DEST/api/config.example.json" "$TOKEN_FILE" <<'PY'
 import json, sys, os
@@ -65,9 +65,29 @@ PY
   chmod 600 "$CFG"
 else
   # Config already exists (probably from an earlier deploy): refresh the
-  # token secret in place so a placeholder/old value never strands the API.
+  # token secret in place and REUSE the existing site/admin secrets so the
+  # public website keeps matching the API (a fresh random secret would
+  # break every request with 'bad or missing X-Agency-Secret').
   say "$CFG exists — refreshing proxmox token secret in place"
   "$PYTHON" "$DEST/deploy/refresh_token.py" "$CFG" "$TOKEN_FILE"
+  read -r SITE_SECRET ADMIN_KEY <<< "$("$PYTHON" - "$CFG" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+print((cfg.get("site_secret") or ""), (cfg.get("admin_key") or ""))
+PY
+)"
+  if [ -z "$SITE_SECRET" ] || [ -z "$ADMIN_KEY" ]; then
+    say "!! config has empty site/admin secrets — generating and patching"
+    SITE_SECRET="$(openssl rand -hex 24)"
+    ADMIN_KEY="$(openssl rand -hex 24)"
+    "$PYTHON" - "$CFG" "$SITE_SECRET" "$ADMIN_KEY" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+cfg["site_secret"] = sys.argv[2]
+cfg["admin_key"] = sys.argv[3]
+json.dump(cfg, open(sys.argv[1], "w"), indent=2)
+PY
+  fi
   echo "    NOTE: edit $CFG directly (the deployed copy) — not the repo's api/config.json"
 fi
 

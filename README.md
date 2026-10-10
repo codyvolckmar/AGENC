@@ -166,6 +166,7 @@ curl -X POST http://NODE/api/agents \
 | `cores` | `0` | `0` ⇒ use *all* host cores, shared: every agent can burst on any core (no pinning); `cpuunits` (1024) keeps the scheduler fair; set `cpulimit` to cap one agent |
 | `unprivileged` | `true` | unprivileged LXC (the community-scripts default) |
 | `net_bridge` | `sandbox` | the **SDN vnet** (or linux bridge) every agent NIC attaches to — `bridge=sandbox` in net0 |
+| `net_preflight` | `true` | verify the NIC target exists before provisioning; set `false` if you manage a raw bridge device PVE's API can't list |
 | `features` | `nesting=1,keyctl=1` | useful for agents running nested tooling |
 | `vmid_start`/`vmid_end` | `1000`–`1999` | allocation range |
 
@@ -268,6 +269,8 @@ journalctl -u agenc-api -n 50
 |---|---|---|
 | `auth` / 401 from PVE, health `proxmox.auth_ok=false` | bad token in `config.json` | token lives in `/root/.agenc-token`; re-run `proxmox/setup.sh`, then re-deploy (wires it automatically) |
 | `403 Permission check failed … Sys.Audit` (health `auth_ok=null`) | PVE 9 privsep token without its own ACL | re-run `proxmox/setup.sh` — it grants the token-level ACL and re-verifies (`token permissions OK`) |
+| ⚠ `bad or missing X-Agency-Secret` on the website | website secret ≠ API secret (a deploy regenerated it) | re-run `./deploy/deploy.sh .` — it now **reuses** the API's secret for the site |
+| `net_bridge_ok=false` but your bridge/vnet exists | raw kernel bridge not defined in `/etc/network/interfaces` (PVE API can't list it) | define it in PVE (Node → Network → Create Linux Bridge / SDN), **or** set `container.net_preflight: false` in config.json if you manage that network yourself |
 | `NIC target 'sandbox' not found` | vnet/bridge missing, or token lacks `SDN.Audit` | create the `sandbox` SDN vnet (setup.sh can: `SDN_ZONE=<zone>`), re-apply SDN, re-run setup.sh to refresh the role |
 | `no template matching prefix` / health `templates_available=null` | OS template not downloaded | `./proxmox/setup.sh` (downloads it) or `pveam download local <template>` |
 | `task failed` / task stuck | PVE side: check the node's task log | `/nodes/<node>/tasks` in the GUI; or `pct status <vmid>` |
