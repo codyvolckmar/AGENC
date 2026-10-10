@@ -104,7 +104,25 @@ case "${1:-}" in
   available) echo "ubuntu-24.04-standard_24.04-2_amd64.tar.zst" ;;
 esac
 EOF
-chmod +x "$BIN/pveum" "$BIN/pvesh" "$BIN/pveam"
+
+cat > "$BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+# fake curl: simulates the PVE API auth check used by setup.sh
+STATE="${FAKE_PVE_STATE:-/tmp/fake-pve-state}"
+mkdir -p "$STATE"
+case " $* " in
+  *"%{http_code}"*)
+    if [ "${FAKE_CURL_FAIL_ONCE:-0}" = "1" ] && [ ! -f "$STATE/curl-failed" ]; then
+      : > "$STATE/curl-failed"
+      echo 401
+    else
+      echo "${FAKE_CURL_STATUS:-200}"
+    fi
+    ;;
+  *) echo '{"data":{"version":"fake 9.0"}}' ;;
+esac
+EOF
+chmod +x "$BIN/pveum" "$BIN/pvesh" "$BIN/pveam" "$BIN/curl"
 
 run_setup() {
   FAKE_PVE_STATE="$STATE" \
@@ -148,6 +166,19 @@ echo "$OUT" | grep -q "token written to" || { echo "FAIL: token not recreated"; 
 [ -s "$WORK/agenc-token" ] || { echo "FAIL: token file missing after recovery"; exit 1; }
 SECRET_AFTER="$(cat "$WORK/agenc-token" | cut -d= -f3)"
 [ "$SECRET_AFTER" = "$(cat "$STATE/token-secret")" ] || { echo "FAIL: recreated secret mismatch"; exit 1; }
+echo "    ok"
+
+echo "==> test 5: stale token (PVE rejects the saved secret) — expect rotation"
+# simulate: a token exists in PVE, a token file exists, but the secret is stale
+: > "$STATE/token-added"
+: > "$STATE/token-secret"
+printf 'PVEAPIToken=agenc-bot@pve!agenc=deadbeef-dead-beef-dead-beefdeadbeef\n' > "$WORK/agenc-token"
+rm -f "$STATE/curl-failed"
+OUT="$(FAKE_CURL_FAIL_ONCE=1 run_setup)"
+echo "$OUT" | grep -q "token rejected" || { echo "FAIL: no rejection detected"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep -q "token OK after rotation" || { echo "FAIL: rotation did not verify OK"; echo "$OUT"; exit 1; }
+[ "$(cat "$WORK/agenc-token" | cut -d= -f3)" = "$(cat "$STATE/token-secret")" ] \
+  || { echo "FAIL: file not updated with the fresh secret"; exit 1; }
 echo "    ok"
 
 echo

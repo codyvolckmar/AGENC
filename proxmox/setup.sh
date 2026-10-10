@@ -157,6 +157,47 @@ else
 fi
 rm -f "$TMP_OUT"
 
+# --- 3b. verify the saved token actually authenticates ----------------------
+PVE_API="${PVE_API:-https://127.0.0.1:8006}"
+pve_api_status() {  # => HTTP code of GET /version with the saved token, or 'none'
+  [ -s "$TOKEN_FILE" ] || { echo none; return; }
+  curl -sk -o /dev/null -w '%{http_code}' \
+    -H "Authorization: $(cat "$TOKEN_FILE")" \
+    "$PVE_API/api2/json/version" 2>/dev/null || echo none
+}
+echo "==> Verifying API token against PVE"
+CODE="$(pve_api_status)"
+if [ "$CODE" = "200" ]; then
+  echo "    token OK — PVE accepts it"
+else
+  echo "!! token rejected (HTTP ${CODE:-none}) — the saved secret no longer matches PVE."
+  echo "   Rotating: deleting the stale token and creating a fresh one."
+  if pvesh delete "/access/users/$TOKEN_USER/tokens/$TOKEN_ID" 2>/dev/null; then
+    rm -f "$TOKEN_FILE"
+    ROT_OUT="$(mktemp)"
+    if create_token "$ROT_OUT"; then
+      CODE2="$(pve_api_status)"
+      if [ "$CODE2" = "200" ]; then
+        echo "    token OK after rotation"
+      else
+        echo "!! still rejected (HTTP ${CODE2:-none}) — verify PVE reachable:"
+        echo "   curl -sk $PVE_API/api2/json/version   (and check the date/clock on this node)" >&2
+        exit 1
+      fi
+    else
+      echo "!! rotation failed:" >&2
+      cat "$ROT_OUT" >&2
+      exit 1
+    fi
+    rm -f "$ROT_OUT"
+  else
+    echo "!! could not delete the stale token. Do it manually, then re-run:" >&2
+    echo "   pvesh delete /access/users/$TOKEN_USER/tokens/$TOKEN_ID" >&2
+    echo "   (or GUI: Datacenter -> Permissions -> API Tokens -> delete '$TOKEN_ID')" >&2
+    exit 1
+  fi
+fi
+
 # --- 4. base template ----------------------------------------------------
 echo "==> Ensuring OS template '${OS_TEMPLATE}' on '${STORAGE}'"
 if pveam list "$STORAGE" 2>/dev/null | grep -q "$OS_TEMPLATE"; then
@@ -195,8 +236,10 @@ pvesh get /nodes/$(hostname)/status --output-format json \
   | grep -o '"cpus":[0-9]*' | head -1 | sed 's/^/    host cpus: /'
 
 echo
-echo "==> Done. Next:"
-echo "    cp api/config.example.json api/config.json"
-echo "    sed -i 's#REPLACE_FROM_/root/.agenc-token#$(cat "$TOKEN_FILE" | cut -d= -f3)#' api/config.json"
-echo "    ./deploy/deploy.sh ."
+echo "==> Done. Token verified and saved to $TOKEN_FILE."
+echo "Next:"
+echo "    ./deploy/deploy.sh .      # installs/updates /opt/agenc + wires the token"
+echo "                              # from $TOKEN_FILE automatically (no manual sed)"
+echo "    then edit /opt/agenc/api/config.json if needed (storage, billing.receive_addresses)"
+echo "      and: systemctl restart agenc-api"
 echo "    then port-forward your web ports (80/443) to this node."

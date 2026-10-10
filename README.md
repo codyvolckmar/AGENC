@@ -67,14 +67,20 @@ templates are the same unprivileged-LXC builds used by
 [community-scripts.org](https://community-scripts.org/scripts) (see
 [“Templates”](#templates)).
 
-### 2. Configure
+### 2. Configure (optional — usually nothing to do)
 
-```bash
-cp api/config.example.json api/config.json
-# edit api/config.json:
-#   proxmox.host / api_token_id / api_token_secret
-#   billing.receive_addresses.USDC / USDT   <- your wallet addresses
-#   container.disk_gb (8), memory_mb (2048), cores (0 = share all host cores)
+`deploy/deploy.sh` generates `/opt/agenc/api/config.json` with random
+`site_secret`/`admin_key` and wires the Proxmox token from
+`/root/.agenc-token` **automatically** — `setup.sh` verifies the token
+against PVE on every run and rotates it if stale, so there is no manual
+`cp`/`sed` of the config. To customize later, edit **`/opt/agenc/api/config.json`**
+(the deployed copy, not the repo's) and `systemctl restart agenc-api`:
+
+```json
+// /opt/agenc/api/config.json
+"proxmox":   { "node": "pve", "rootfs_storage": "local-lvm", ... }
+"container": { "disk_gb": 8, "memory_mb": 2048, "cores": 0, ... }
+"billing":   { "receive_addresses": { "USDC": "0x…", "USDT": "0x…" }, ... }
 ```
 
 ### 3. Deploy
