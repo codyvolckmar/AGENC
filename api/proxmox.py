@@ -203,30 +203,41 @@ class Proxmox:
         return None
 
     # ------------------------------------------------------------ network
-    def net_exists(self, name: str) -> bool:
+    def net_exists(self, name: str) -> bool | None:
         """Is `name` a usable NIC target on the node?
 
-        Accepts an SDN vnet (Proxmox SDN) or a plain linux bridge — both are
-        valid `bridge=` values in a container's net0. Dry-run mode pretends
-        only the configured default ('sandbox') exists so the preflight is
-        demoable.
+        Returns tri-state:
+          True  — verified present (SDN vnet or linux bridge)
+          False — verified absent on both
+          None  — cannot determine (e.g. the token lacks permission to list
+                  SDN vnets, or SDN is not enabled). None != missing: the
+                  caller should proceed and let creation surface the truth.
         """
         if self.dry_run:
             self._sim("GET", "/cluster/sdn/vnets")
             self._sim("GET", f"/nodes/{self.node}/network")
             return name == "sandbox"
+
+        vnet_known: bool | None = None
+        bridge_known: bool | None = None
         try:
             vnets = self._request("GET", "/cluster/sdn/vnets") or []
-            for vnet in vnets:
-                if str(vnet.get("vnet")) == name:
-                    return True
+            vnet_known = any(str(v.get("vnet")) == name for v in vnets)
         except ProxmoxError:
-            pass  # SDN may not be enabled — fall through to linux bridges
+            vnet_known = None  # permission / SDN not configured — unknown
         try:
             ifaces = self._request("GET", f"/nodes/{self.node}/network") or []
-            return any(i.get("name") == name and i.get("type") == "bridge" for i in ifaces)
+            bridge_known = any(
+                i.get("name") == name and i.get("type") == "bridge" for i in ifaces
+            )
         except ProxmoxError:
+            bridge_known = None
+
+        if vnet_known is True or bridge_known is True:
+            return True
+        if vnet_known is False and bridge_known is False:
             return False
+        return None
 
     # ------------------------------------------------------------ misc
     def _next_seq(self) -> int:

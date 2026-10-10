@@ -25,7 +25,7 @@ TOKEN_FILE="${TOKEN_FILE:-/root/.agenc-token}"
 # 'VM.Monitor'". It is therefore NOT listed here. The script first tries the
 # full intersection-safe set, and if pveum reports an unknown privilege for
 # this PVE version, it falls back to a minimal set.
-PRIVS_MAIN="VM.Allocate VM.Audit VM.Clone VM.Config.CPU VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.PowerMgmt Datastore.Allocate Datastore.AllocateTemplate Datastore.Audit Sys.Audit"
+PRIVS_MAIN="VM.Allocate VM.Audit VM.Clone VM.Config.CPU VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.PowerMgmt Datastore.Allocate Datastore.AllocateTemplate Datastore.Audit Sys.Audit SDN.Audit SDN.Use"
 PRIVS_MIN="VM.Allocate VM.Audit VM.Config.CPU VM.Config.Disk VM.Config.Memory VM.Config.Network VM.Config.Options Datastore.Allocate Datastore.AllocateTemplate Datastore.Audit Sys.Audit"
 
 echo "==> AGENCY node setup on $(hostname)"

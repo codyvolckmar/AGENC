@@ -124,6 +124,9 @@ class AgencyTest(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertTrue(res["ok"])
         self.assertTrue(res["dry_run"])
+        self.assertTrue(res["proxmox"]["reachable"])
+        self.assertTrue(res["proxmox"]["auth_ok"])
+        self.assertGreater(res["templates_available"], 0)
         self.assertEqual(res["free_tier"]["limit"], 1)
         self.assertIsInstance(res["agents"]["alive"], int)
         self.assertGreater(res["cpus"], 0)
@@ -221,6 +224,25 @@ class AgencyTest(unittest.TestCase):
             f"/api/agents/{agent['id']}/destroy", admin=ADMIN_KEY)
         self.assertEqual(code, 200)
         self.assertEqual(res["agent"]["status"], "destroyed")
+
+    def test_admin_retry(self):
+        # simulate a failed provisioning record (real errors now get recorded)
+        store = self.server.state["store"]
+        agent = {
+            "id": "ag_retry012345", "hostname": "retry-1", "email": "r@example.com",
+            "memory_mb": 2048, "disk_gb": 8,
+            "created_at": 0, "updated_at": 0,
+            "free_tier": False,  # don't consume the free slot for other tests
+            "status": "error", "error": "provision failed: simulated",
+        }
+        store.add(agent)
+        code, _ = self.api.post(f"/api/agents/{agent['id']}/retry")
+        self.assertEqual(code, 403)  # admin only
+        code, res = self.api.post(f"/api/agents/{agent['id']}/retry", admin=ADMIN_KEY)
+        self.assertEqual(code, 200)
+        self.assertEqual(res["agent"]["status"], "provisioning")
+        self.assertIsNone(res["agent"].get("error"))
+        self.wait_status(agent["id"], "running")
 
     def test_public_view_never_leaks_ssh_key(self):
         _, res = self.api.get("/api/agents")

@@ -122,6 +122,7 @@ admin calls need `X-Admin-Key: <admin_key>`.
 | `GET` | `/api/agents` | — | all agent summaries (no PII, no SSH keys) |
 | `GET` | `/api/agents/:id` | — | one agent: status, IP, quote |
 | `POST` | `/api/agents/:id/confirm-payment` | admin | mark USDC/USDT paid → provision |
+| `POST` | `/api/agents/:id/retry` | admin | retry a failed provisioning (record keeps the real error) |
 | `POST` | `/api/agents/:id/destroy` | admin | delete the LXC, reclaim disk |
 
 ### Example — request a home
@@ -196,6 +197,21 @@ detect the vnet and can even create it: `SDN_ZONE=<zone> ./proxmox/setup.sh`).
   `proxmox/setup.sh` no longer requests it; if your pveum rejects any
   optional privilege it automatically falls back to a reduced set, so the
   script works on PVE 7.4 → 9.x.
+- **SDN privileges included** (`SDN.Audit`, `SDN.Use` in `Agenc-Operator`):
+  needed to inspect vnets and attach NICs to the `sandbox` vnet. Without
+  them the API cannot tell "vnet missing" from "no permission" — the vnet
+  check is tri-state (`true`/`false`/`null`), and only a verified-absent
+  result blocks provisioning. `null` proceeds and surfaces the real
+  create-time error.
+- **Real errors are recorded.** A failed provisioning persists the actual
+  reason on the agent record (and surfaces in the UI + `error` field) — no
+  more misleading `provision task missing`. Fix the cause, then
+  `POST /api/agents/:id/retry` (admin).
+- **/api/health is your diagnose tool.** Returns `proxmox.reachable`,
+  `proxmox.auth_ok`, `templates_available`, `net_bridge`, `net_bridge_ok`,
+  free-tier usage. `deploy/deploy.sh` prints these on deploy and warns if
+  `REPLACE_*` placeholders or zeroed `0x0000…0000` payment addresses are
+  still in `config.json`.
 - **Auto-IP is best-effort.** The API tries `pct exec` to read the
   container's IP after creation. Tokens are sometimes denied that call —
   the home still provisions; grab the IP from the Proxmox GUI in that case.
@@ -217,6 +233,34 @@ maintains a large catalogue of ready-made container **application** builds
 point `proxmox.os_template` at any template in your template storage, or
 adapt `provisioning.build_params` to layer their scripts into the agent
 home after creation.
+
+## Troubleshooting
+
+An agent stuck in `error` is almost always one of four things — all are
+visible in `/api/health` and on the agent's `error` field:
+
+```bash
+curl http://localhost:8080/api/health | python3 -m json.tool
+journalctl -u agenc-api -n 50
+```
+
+| Symptom in `error` / health | Cause | Fix |
+|---|---|---|
+| `auth` / 401 from PVE, health `proxmox.auth_ok=false` | bad token in `config.json` | token lives in `/root/.agenc-token`; re-run `proxmox/setup.sh`, then `sed` it into `config.json` or re-deploy |
+| `NIC target 'sandbox' not found` | vnet/bridge missing, or token lacks `SDN.Audit` | create the `sandbox` SDN vnet (setup.sh can: `SDN_ZONE=<zone>`), re-apply SDN, re-run setup.sh to refresh the role |
+| `no template matching prefix` / health `templates_available=null` | OS template not downloaded | `./proxmox/setup.sh` (downloads it) or `pveam download local <template>` |
+| `task failed` / task stuck | PVE side: check the node's task log | `/nodes/<node>/tasks` in the GUI; or `pct status <vmid>` |
+
+Fix the cause, then retry the agent (admin):
+
+```bash
+curl -X POST http://localhost:8080/api/agents/ag_xxxxxxxxxx/retry \
+     -H "X-Admin-Key: $ADMIN_KEY"
+```
+
+Deploy-time warnings (`REPLACE_*` placeholders, `0x0000…0000` payment
+addresses, `net_bridge_ok=false`) are printed by `deploy/deploy.sh` and
+surfaced again on every `/api/health`.
 
 ## Roadmap (natural next steps)
 

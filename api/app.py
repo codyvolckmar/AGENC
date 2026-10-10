@@ -242,18 +242,28 @@ class AgencyHandler(BaseHTTPRequestHandler):
         try:
             # ---- health
             if method == "GET" and parts == ["api", "health"]:
+                bridge = cfg["container"].get("net_bridge", "sandbox")
+                px_info = {"reachable": False, "auth_ok": None, "error": None}
+                cpus = 0
+                mem = {}
                 try:
                     node = pve.node_status()
+                    px_info.update({"reachable": True, "auth_ok": True})
+                    cpus = (node.get("cpuinfo") or {}).get("cpus", 0)
+                    mem = node.get("memory", {})
                 except ProxmoxError as exc:
-                    return self.error_json(502, str(exc), "proxmox")
-                cpus = (node.get("cpuinfo") or {}).get("cpus", 0)
-                mem = node.get("memory", {})
-                bridge = cfg["container"].get("net_bridge", "sandbox")
+                    px_info["error"] = str(exc)
+                try:
+                    templates = len(pve.list_templates())
+                except ProxmoxError:
+                    templates = None
                 return self.send_json(200, {
                     "ok": True,
                     "dry_run": cfg["dry_run"],
                     "node": pve.node,
-                    "node_status": node.get("status"),
+                    "proxmox": px_info,
+                    "templates_available": templates,
+                    "node_status": "online" if px_info["reachable"] else "unreachable",
                     "cpus": cpus,
                     "mem_total_gb": round((mem.get("total") or 0) / 1073741824, 1),
                     "mem_used_gb": round((mem.get("used") or 0) / 1073741824, 1),
@@ -350,6 +360,24 @@ class AgencyHandler(BaseHTTPRequestHandler):
                 store.update(agent["id"], status="provisioning")
                 start_provision(store, cfg, pve, agent)
                 log.info("payment confirmed for %s — provisioning", agent["id"])
+                return self.send_json(200, {"ok": True, "agent": public_agent(store.get(agent["id"]))})
+
+            # ---- retry a failed provisioning (admin)
+            if method == "POST" and len(parts) == 4 and parts[:2] == ["api", "agents"] \
+                    and parts[3] == "retry":
+                if not self._admin_ok():
+                    return self.error_json(403, "bad or missing X-Admin-Key", "auth")
+                agent = store.get(parts[2])
+                if not agent:
+                    return self.error_json(404, "no such agent", "not_found")
+                if agent.get("status") != "error":
+                    return self.error_json(409, "agent is not in error state", "conflict")
+                store.update(agent["id"], status="provisioning", error=None)
+                try:
+                    start_provision(store, cfg, pve, agent)
+                except ProxmoxError as exc:
+                    return self.send_json(502, {"ok": False, "agent": public_agent(store.get(agent["id"])),
+                                                 "error": {"kind": "proxmox", "message": str(exc)}})
                 return self.send_json(200, {"ok": True, "agent": public_agent(store.get(agent["id"]))})
 
             # ---- destroy agent home (admin)

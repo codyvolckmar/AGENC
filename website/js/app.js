@@ -95,7 +95,7 @@
     var body = "<dl>" +
       row("status", statusLabel(agent.status)) +
       row("hostname", agent.hostname) +
-      row("specs", agent.memory_mb + " MB RAM · " + agent.disk_gb + " GB disk · " + agent.cores + " shared cores") +
+      row("specs", agent.memory_mb + " MB RAM · " + agent.disk_gb + " GB disk · " + (agent.cores ? agent.cores : "—") + " shared cores") +
       (agent.vmid ? row("vmid", agent.vmid) : "") +
       (agent.ip ? row("ip", agent.ip + '  <code style="border:none;background:none;padding:0;">ssh agent@' + esc(agent.ip) + "</code>") : "") +
       "</dl>";

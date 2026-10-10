@@ -107,14 +107,31 @@ echo "    site secret   : $DEST/website/js/config.js"
 
 # vnet preflight: every agent NIC attaches to this
 sleep 1
-NET_OK="$(curl -s "http://127.0.0.1:${API_PORT}/api/health" | grep -o '"net_bridge_ok":[a-z]*' | cut -d: -f2)"
+HEALTH="$(curl -s "http://127.0.0.1:${API_PORT}/api/health" 2>/dev/null || true)"
+if [ -z "$HEALTH" ]; then
+  echo "    !! /api/health unreachable — is agenc-api running? (journalctl -u agenc-api)"
+fi
+NET_OK="$(printf '%s' "$HEALTH" | grep -o '"net_bridge_ok":[a-z]*' | head -1 | cut -d: -f2)"
+PX_OK="$(printf '%s' "$HEALTH" | grep -o '"auth_ok":[a-z]*' | head -1 | cut -d: -f2)"
 if [ "$NET_OK" = "true" ]; then
-  echo "    vnet preflight : sandbox vnet/bridge found — agent NICs will attach"
-elif [ "$NET_OK" = "false" ]; then
-  echo "    !! net_bridge_ok=false — create the 'sandbox' SDN vnet (or linux"
-  echo "       bridge) before provisioning; see proxmox/setup.sh for help"
+  echo "    vnet preflight : sandbox present — agent NICs will attach"
+elif [ "$NET_OK" = "null" ]; then
+  echo "    !! net_bridge_ok=null — token may lack SDN.Audit/SDN.Use; re-run proxmox/setup.sh"
 else
-  echo "    vnet preflight : couldn't query /api/health (API may still be warming up)"
+  echo "    !! net_bridge_ok=false — create the 'sandbox' SDN vnet (or linux bridge) first"
+fi
+[ "$PX_OK" = "true" ] && echo "    pve auth        : token accepted by the API" \
+  || echo "    !! pve auth      : token NOT accepted — check config.json proxmox.api_token_secret"
+echo
+
+# safety checks: placeholder values left in config.json?
+if grep -q "REPLACE" "$CFG"; then
+  echo "    WARNING: '$CFG' still contains REPLACE_* placeholders:"
+  grep -n "REPLACE" "$CFG" | sed 's/^/      /'
+fi
+if grep -q "0x0000000000000000000000000000000000000000" "$CFG"; then
+  echo "    WARNING: billing.receive_addresses are still zeroed 0x0000…0000 —"
+  echo "      customers cannot pay until you set real USDC/USDT addresses in $CFG"
 fi
 echo
 echo "    NEXT: point your router's port-forward rules at $MY_IP so the"
