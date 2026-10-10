@@ -54,7 +54,8 @@ cfg["listen_host"] = host
 cfg["listen_port"] = int(port)
 if os.path.exists(token_file):
     token = open(token_file).read().strip()
-    cfg["proxmox"]["api_token_secret"] = token.split("=", 1)[1].strip()
+    # file format: PVEAPIToken=agenc-bot@pve!agenc=<secret>  (TWO '=' signs)
+    cfg["proxmox"]["api_token_secret"] = token.rsplit("=", 1)[1].strip()
     print("    token secret wired from " + token_file)
 else:
     print("    !! " + token_file + " missing — api_token_secret left as placeholder;")
