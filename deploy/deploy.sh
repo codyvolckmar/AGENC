@@ -63,6 +63,10 @@ else:
 json.dump(cfg, open(cfg_path, "w"), indent=2)
 PY
   chmod 600 "$CFG"
+  say "Fresh config written. First-run checklist (edit $CFG, then systemctl restart agenc-api):"
+  echo "      container.net_preflight     -> false if you use a hand-made bridge PVE can't list"
+  echo "      billing.free_tier_containers -> 0 = provision everything free (billing off)"
+  echo "      billing.receive_addresses    -> your real USDC/USDT wallet addresses (when charging)"
 else
   # Config already exists (probably from an earlier deploy): refresh the
   # token secret in place and REUSE the existing site/admin secrets so the
