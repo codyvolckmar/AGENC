@@ -45,24 +45,29 @@ CFG="$DEST/api/config.json"
 if [ ! -f "$CFG" ]; then
   say "Generating $CFG from example (dry_run=false)"
   "$PYTHON" - "$CFG" "$SITE_SECRET" "$ADMIN_KEY" "$API_HOST" "$API_PORT" "$DEST/api/config.example.json" "$TOKEN_FILE" <<'PY'
-import json, sys
+import json, sys, os
 cfg_path, site, admin, host, port, example_path, token_file = sys.argv[1:]
 cfg = json.load(open(example_path))
 cfg["site_secret"] = site
 cfg["admin_key"] = admin
 cfg["listen_host"] = host
 cfg["listen_port"] = int(port)
-# wire the Proxmox token secret from /root/.agenc-token if present
-try:
+if os.path.exists(token_file):
     token = open(token_file).read().strip()
     cfg["proxmox"]["api_token_secret"] = token.split("=", 1)[1].strip()
-except FileNotFoundError:
-    pass
+    print("    token secret wired from " + token_file)
+else:
+    print("    !! " + token_file + " missing — api_token_secret left as placeholder;")
+    print("       run proxmox/setup.sh, then re-run this deploy to wire it")
 json.dump(cfg, open(cfg_path, "w"), indent=2)
 PY
   chmod 600 "$CFG"
 else
-  say "$CFG already exists — keeping it (run with DEST and delete to regenerate)"
+  # Config already exists (probably from an earlier deploy): refresh the
+  # token secret in place so a placeholder/old value never strands the API.
+  say "$CFG exists — refreshing proxmox token secret in place"
+  "$PYTHON" "$DEST/deploy/refresh_token.py" "$CFG" "$TOKEN_FILE"
+  echo "    NOTE: edit $CFG directly (the deployed copy) — not the repo's api/config.json"
 fi
 
 # --- 3. website client config ------------------------------------------------
@@ -111,8 +116,8 @@ HEALTH="$(curl -s "http://127.0.0.1:${API_PORT}/api/health" 2>/dev/null || true)
 if [ -z "$HEALTH" ]; then
   echo "    !! /api/health unreachable — is agenc-api running? (journalctl -u agenc-api)"
 fi
-NET_OK="$(printf '%s' "$HEALTH" | grep -o '"net_bridge_ok":[a-z]*' | head -1 | cut -d: -f2)"
-PX_OK="$(printf '%s' "$HEALTH" | grep -o '"auth_ok":[a-z]*' | head -1 | cut -d: -f2)"
+NET_OK="$(printf '%s' "$HEALTH" | grep -o '"net_bridge_ok": *[a-z]*' | head -1 | sed 's/.*: *//')"
+PX_OK="$(printf '%s' "$HEALTH" | grep -o '"auth_ok": *[a-z]*' | head -1 | sed 's/.*: *//')"
 if [ "$NET_OK" = "true" ]; then
   echo "    vnet preflight : sandbox present — agent NICs will attach"
 elif [ "$NET_OK" = "null" ]; then

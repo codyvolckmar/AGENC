@@ -62,7 +62,11 @@ class Proxmox:
                 detail = exc.read().decode("utf-8", "replace")[:500]
             except Exception:
                 pass
-            raise ProxmoxError(f"PVE {method} {path} -> HTTP {exc.code}: {detail}") from exc
+            hint = ""
+            if exc.code == 401:
+                hint = (" (unauthorized — check proxmox.api_token_id / api_token_secret "
+                        "in config.json, or re-run proxmox/setup.sh + deploy to refresh)")
+            raise ProxmoxError(f"PVE {method} {path} -> HTTP {exc.code}: {detail}{hint}") from exc
         except urllib.error.URLError as exc:
             raise ProxmoxError(f"PVE unreachable at {self.base}: {exc.reason}") from exc
         return payload.get("data") if isinstance(payload, dict) else payload
