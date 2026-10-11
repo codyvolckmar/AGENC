@@ -269,6 +269,61 @@ class AgencyTest(unittest.TestCase):
                 srv.shutdown()
                 srv.server_close()
 
+    def test_stack_catalog(self):
+        code, res = self.api.get("/api/stacks")
+        self.assertEqual(code, 200)
+        self.assertTrue(res["ok"])
+        self.assertGreater(len(res["selectable"]), 0)
+        self.assertGreater(len(res["baked"]), 0)
+        self.assertEqual(res["max_groups"], 6)
+        selectable = [g["id"] for g in res["selectable"]]
+        self.assertIn("databases", selectable)
+        self.assertNotIn("base", selectable)  # baked groups are not tickable
+        self.assertEqual(res["venv"]["id"], "agent-python")
+
+    def test_stack_validation(self):
+        code, res = self.api.post("/api/agents", {
+            "hostname": "stackbad-1", "email": "s@e.c", "stack": ["not-a-group"],
+        }, secret=SITE_SECRET)
+        self.assertEqual(code, 422)
+        code, _ = self.api.post("/api/agents", {
+            "hostname": "stackbad-2", "email": "s@e.c",
+            "stack": ["databases", "net-scan", "containers", "monitor", "media", "x11", "headless"],
+        }, secret=SITE_SECRET)
+        self.assertEqual(code, 422)
+
+    def test_stack_provisions_and_installs(self):
+        """Customer-curated stack persists and the home reaches running (dry-run)."""
+        with tempfile.TemporaryDirectory(prefix="agenc-stack-") as d:
+            cfg = make_config(d)
+            cfg["billing"]["free_tier_containers"] = 0
+            srv = build_server(cfg)
+            thread = threading.Thread(target=srv.serve_forever, daemon=True)
+            thread.start()
+            api = Api(f"http://127.0.0.1:{srv.server_address[1]}")
+            try:
+                code, res = api.post("/api/agents", {
+                    "hostname": "stacky-1", "email": "s@e.c",
+                    "stack": ["databases", "net-scan"],
+                }, secret=SITE_SECRET)
+                self.assertEqual(code, 201)
+                agent = res["agent"]
+                self.assertEqual(sorted(agent["stack"]), ["databases", "net-scan"])
+                self.assertEqual(agent["status"], "provisioning")
+                # wait for running (stack install completes instantly in dry-run)
+                deadline = time.time() + 20
+                last = None
+                while time.time() < deadline:
+                    _, last = api.get(f"/api/agents/{agent['id']}")
+                    if last["agent"]["status"] == "running":
+                        break
+                    time.sleep(0.3)
+                self.assertEqual(last["agent"]["status"], "running")
+                self.assertEqual(last["agent"]["stack_status"], "done")
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
     def test_public_view_never_leaks_ssh_key(self):
         _, res = self.api.get("/api/agents")
         for agent in res["agents"]:

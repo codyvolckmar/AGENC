@@ -254,6 +254,35 @@ code {
 .fine { color: var(--muted); font-size: 13.5px; max-width: 720px; margin-top: 28px; }
 
 /* -------------------------------------------------------------- form */
+.stack-picker {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+}
+.stack-picker legend { font-weight: 700; padding: 0 6px; }
+.stack-picker legend em { color: var(--muted); font-weight: 400; }
+.stack-picker .fine { margin: 10px 0 14px; }
+.stack-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+}
+.stack-card {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.stack-card:hover { border-color: var(--accent); }
+.stack-card input { margin-top: 4px; accent-color: var(--accent); }
+.stack-card input:disabled { opacity: 0.35; }
+.stack-card-body b { display: block; font-size: 13.5px; }
+.stack-card-body small { display: block; color: var(--muted); font-size: 12px; line-height: 1.45; margin-top: 2px; }
 .request-grid {
   display: grid;
   grid-template-columns: minmax(280px, 520px) 1fr;

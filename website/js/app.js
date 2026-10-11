@@ -92,12 +92,21 @@
   }
 
   function agentPanel(agent) {
+    var stackLine = "";
+    if (agent.stack && agent.stack.length) {
+      stackLine = row("app stack", agent.stack.map(function (s) { return stackLabels[s] || s; }).join(", "));
+      if (agent.stack_status && agent.stack_status !== "done") {
+        stackLine += "<p style=\"color:var(--warn);font-size:12.5px;margin-top:4px;\">curated stack " +
+          (agent.stack_status || "") + " — installing after the container boots…</p>";
+      }
+    }
     var body = "<dl>" +
       row("status", statusLabel(agent.status)) +
       row("hostname", agent.hostname) +
       row("specs", agent.memory_mb + " MB RAM · " + agent.disk_gb + " GB disk · " + (agent.cores ? agent.cores : "—") + " shared cores") +
       (agent.vmid ? row("vmid", agent.vmid) : "") +
       (agent.ip ? row("ip", agent.ip + '  <code style="border:none;background:none;padding:0;">ssh root@' + esc(agent.ip) + "</code>") : "") +
+      stackLine +
       "</dl>";
     return (
       '<h3>' + statusDot(agent.status) + " " + esc(agent.hostname) + "</h3>" +
@@ -123,6 +132,7 @@
       email: form.email.value.trim(),
       purpose: form.purpose.value.trim(),
       ssh_key: form.ssh_key.value.trim(),
+      stack: selectedStack(),
     };
     var btn = form.querySelector("button[type=submit]");
     btn.disabled = true;
@@ -203,6 +213,53 @@
   $("#agent-id").addEventListener("keydown", function (ev) {
     if (ev.key === "Enter") $("#lookup-btn").click();
   });
+
+  /* curate-your-stack picker ----------------------------------------------- */
+  var stackLabels = {};
+  var stackMax = 6;
+
+  function selectedStack() {
+    return Array.prototype.map.call(
+      document.querySelectorAll("#stack-options input[type=checkbox]:checked"),
+      function (el) { return el.value; }
+    );
+  }
+
+  function renderStackCard(opt, checked) {
+    stackLabels[opt.id] = opt.label;
+    return (
+      '<label class="stack-card">' +
+      '<input type="checkbox" value="' + esc(opt.id) + '" ' + (checked ? "checked" : "") + ">" +
+      "<span class=\"stack-card-body\"><b>" + esc(opt.label) + "</b>" +
+      "<small>" + esc(opt.desc) + "</small></span></label>"
+    );
+  }
+
+  api("/api/stacks").then(function (res) {
+    var box = $("#stack-options");
+    if (!box || !res.ok) return;
+    stackMax = res.max_groups || 6;
+    var baked = $("#stack-baked");
+    if (baked && res.baked) {
+      baked.innerHTML = "Baked into the base image: " + res.baked.map(function (g) { return "<b>" + esc(g.label) + "</b>"; }).join(" · ") +
+        ". Pick up to " + stackMax + " add-ons below:";
+    }
+    var html = (res.selectable || []).map(function (g) { return renderStackCard(g, false); }).join("");
+    if (res.venv) html += renderStackCard(res.venv, false);
+    box.innerHTML = html;
+
+    box.addEventListener("change", function () {
+      var checked = selectedStack();
+      var over = checked.length > stackMax;
+      Array.prototype.forEach.call(box.querySelectorAll("input[type=checkbox]"), function (el) {
+        if (!el.checked && over) el.disabled = true;
+        else el.disabled = false;
+      });
+      var note = $("#form-note");
+      if (over) note.textContent = "⚠ max " + stackMax + " stack add-ons — uncheck one to continue";
+      else note.textContent = "";
+    });
+  }).catch(function () { /* stacks endpoint down — form still works without the picker */ });
 
   /* copy buttons (event delegation) */
   document.addEventListener("click", function (ev) {

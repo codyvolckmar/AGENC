@@ -35,6 +35,7 @@ from proxmox import Proxmox, ProxmoxError  # noqa: E402
 from provisioning import destroy_home, poll_agent, start_provision  # noqa: E402
 from quotes import confirm as confirm_quote  # noqa: E402
 from quotes import create_quote  # noqa: E402
+from stacks import public_catalog, validate_stack  # noqa: E402
 from store import Store  # noqa: E402
 
 log = logging.getLogger("agenc.api")
@@ -44,7 +45,8 @@ SSH_KEY_PREFIXES = ("ssh-rsa ", "ssh-ed25519 ", "ecdsa-sha2-", "sk-ssh-", "sk-ec
 PUBLIC_FIELDS = (
     "id", "hostname", "status", "ip", "vmid", "cores", "memory_mb",
     "disk_gb", "created_at", "updated_at", "email", "purpose",
-    "free_tier", "quote", "error", "task", "template",
+    "free_tier", "quote", "error", "task", "template", "stack",
+    "stack_status",
 )
 
 DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -240,6 +242,12 @@ class AgencyHandler(BaseHTTPRequestHandler):
         parts = [p for p in path.split("/") if p]  # ['api', 'agents', '<id>', ...]
 
         try:
+            # ---- app-stack catalog (public, feeds the website menu)
+            if method == "GET" and parts == ["api", "stacks"]:
+                cat = public_catalog()
+                cat["max_groups"] = int(cfg.get("request", {}).get("max_stack_groups", 6))
+                return self.send_json(200, {"ok": True, **cat})
+
             # ---- health
             if method == "GET" and parts == ["api", "health"]:
                 bridge = cfg["container"].get("net_bridge", "sandbox")
@@ -304,6 +312,13 @@ class AgencyHandler(BaseHTTPRequestHandler):
                 # 0 = unlimited free homes (billing disabled / dev mode)
                 free_tier = free_limit == 0 or store.free_tier_used() < free_limit
                 agent_id = new_id("ag")
+                # customer-curated app stack (validated against the manifest)
+                stack_raw = body.get("stack", [])
+                max_groups = int(cfg.get("request", {}).get("max_stack_groups", 6))
+                stack, stack_err = validate_stack(stack_raw, max_groups)
+                if stack_err:
+                    return self.error_json(422, stack_err, "validation")
+
                 agent = {
                     "id": agent_id,
                     "hostname": hostname,
@@ -311,6 +326,8 @@ class AgencyHandler(BaseHTTPRequestHandler):
                     "purpose": str(body.get("purpose", "")).strip(),
                     "ssh_key": str(body.get("ssh_key", "")).strip() or None,
                     "meta": body.get("meta"),
+                    "stack": stack or None,
+                    "stack_status": None,
                     "memory_mb": cfg["container"]["memory_mb"],
                     "disk_gb": cfg["container"]["disk_gb"],
                     "free_tier": free_tier,
@@ -333,8 +350,8 @@ class AgencyHandler(BaseHTTPRequestHandler):
                         return self.send_json(502, {"ok": True, "created": True,
                                                      "agent": public_agent(store.get(agent_id)),
                                                      "warning": f"creation failed on node: {exc}"})
-                log.info("agent requested: %s free_tier=%s status=%s",
-                         hostname, free_tier, agent["status"])
+                log.info("agent requested: %s free_tier=%s status=%s stack=%s",
+                         hostname, free_tier, agent["status"], agent.get("stack") or [])
                 return self.send_json(201, {"ok": True, "created": True,
                                             "agent": public_agent(store.get(agent_id))})
 

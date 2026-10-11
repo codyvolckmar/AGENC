@@ -29,6 +29,8 @@ IP="${IP:-dhcp}"
 KEEP="${KEEP:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 NODE="$(hostname)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+MANIFEST="${MANIFEST:-$SCRIPT_DIR/../api/stacks.json}"
 
 run() {  # respects DRY_RUN for the destructive steps
   if [ "${DRY_RUN:-0}" = "1" ]; then echo "    [dry-run] $*"; else "$@"; fi
@@ -146,9 +148,33 @@ while [ "$tries" -lt 60 ]; do
 done
 
 # ------------------------------------------------------------ packages
-PACKAGES="${PACKAGES:-ca-certificates curl wget gnupg git jq python3 python3-pip python3-venv build-essential htop tmux vim-nox dnsutils net-tools iputils-ping traceroute unzip zip xz-utils rsync software-properties-common}"
-step "4. Install curated packages"
-echo "    $PACKAGES"
+# Default = the 'baked' groups from api/stacks.json (the same manifest the
+# website menu and the provisioning API use), unless PACKAGES is set.
+if [ -z "${PACKAGES:-}" ]; then
+  step "4. Install baked base packages (from stacks.json 'baked' groups)"
+  PACKAGES="$(python3 - "$MANIFEST" <<'PY'
+import json, sys
+manifest = json.load(open(sys.argv[1]))
+by_id = {g["id"]: g for g in manifest["groups"]}
+pkgs = []
+for gid in manifest.get("baked", []):
+    for p in by_id.get(gid, {}).get("packages", []):
+        if p not in pkgs:
+            pkgs.append(p)
+print(" ".join(pkgs))
+PY
+)"
+else
+  step "4. Install packages (PACKAGES override)"
+fi
+baked_ids() { python3 - "$MANIFEST" <<'PY'
+import json, sys
+manifest = json.load(open(sys.argv[1]))
+print(", ".join(manifest.get("baked", [])))
+PY
+}
+echo "    baked groups : $(baked_ids)"
+echo "    package count: $(echo "$PACKAGES" | wc -w)"
 run pct exec "$VMID" -- bash -c \
   "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq $PACKAGES && apt-get upgrade -y -qq"
 
