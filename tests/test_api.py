@@ -82,6 +82,18 @@ class Api:
         if admin is not None: headers["X-Admin-Key"] = admin
         return self._req("POST", path, body, headers)
 
+    def raw(self, method, path, body=None, headers=None):
+        """Fetch with arbitrary headers; return (status, headers, body)."""
+        req = urllib.request.Request(self.base + path, method=method)
+        for k, v in (headers or {}).items():
+            req.add_header(k, v)
+        data = json.dumps(body).encode() if body is not None else None
+        try:
+            with urllib.request.urlopen(req, data=data, timeout=10) as resp:
+                return resp.status, dict(resp.headers), resp.read().decode()
+        except urllib.error.HTTPError as exc:
+            return exc.code, dict(exc.headers), exc.read().decode()
+
 
 class AgencyTest(unittest.TestCase):
     @classmethod
@@ -342,6 +354,116 @@ class AgencyTest(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             code = exc.code
         self.assertEqual(code, 400)
+
+    # ------------------------------------------------ agent-native surfaces
+    @staticmethod
+    def _hdr(hdrs):
+        return {k.lower(): v for k, v in hdrs.items()}
+
+    def test_llms_index_and_full(self):
+        code, hdrs, body = self.api.raw("GET", "/llms.txt")
+        self.assertEqual(code, 200)
+        self.assertIn("text/plain", self._hdr(hdrs)["content-type"])
+        self.assertIn("# AGENCY", body)
+        self.assertIn("/llms-full.txt", body)
+
+        code, hdrs, full = self.api.raw("GET", "/llms-full.txt")
+        self.assertEqual(code, 200)
+        self.assertIn("text/plain", self._hdr(hdrs)["content-type"])
+        self.assertGreater(len(full), len(body))       # index + reference
+        self.assertIn("X-Agency-Secret", full)         # reference section
+        self.assertIn("request_id", full)              # error-table section
+
+    def test_markdown_twin_pages(self):
+        for path in ("/index.md", "/docs/agents.md", "/docs/agents"):
+            code, hdrs, body = self.api.raw("GET", path)
+            self.assertEqual(code, 200, path)
+            self.assertIn("text/markdown", self._hdr(hdrs)["content-type"], path)
+            self.assertIn("X-Agency-Secret", body, path)
+        # browsers still get the human docs page at /docs
+        code, hdrs, body = self.api.raw("GET", "/docs",
+                                        headers={"User-Agent": "Mozilla/5.0"})
+        self.assertEqual(code, 200)
+        self.assertIn("text/html", self._hdr(hdrs)["content-type"])
+
+    def test_content_negotiation(self):
+        # explicit markdown preference -> markdown twin of the landing page
+        code, hdrs, body = self.api.raw("GET", "/",
+                                        headers={"Accept": "text/markdown"})
+        self.assertEqual(code, 200)
+        self.assertIn("text/markdown", self._hdr(hdrs)["content-type"])
+        self.assertIn("X-Agency-Secret", body)
+        # browsers keep the HTML page
+        code, hdrs, _ = self.api.raw("GET", "/",
+                                     headers={"Accept": "text/html"})
+        self.assertEqual(code, 200)
+        self.assertIn("text/html", self._hdr(hdrs)["content-type"])
+        # a bare wildcard + non-browser UA falls back to markdown
+        code, hdrs, body = self.api.raw("GET", "/",
+                                        headers={"Accept": "*/*",
+                                                 "User-Agent": "curl/8.7"})
+        self.assertEqual(code, 200)
+        self.assertIn("text/markdown", self._hdr(hdrs)["content-type"])
+        self.assertIn("X-Agency-Secret", body)
+        # the JSON API never negotiates
+        code, hdrs, _ = self.api.raw("GET", "/api/health",
+                                     headers={"Accept": "text/markdown"})
+        self.assertEqual(code, 200)
+        self.assertIn("application/json", self._hdr(hdrs)["content-type"])
+
+    def test_error_envelope_and_request_id(self):
+        code, res = self.api.post("/api/agents", {
+            "hostname": "BAD HOST!", "email": "x@y.com"}, secret=SITE_SECRET)
+        self.assertEqual(code, 422)
+        err = res["error"]
+        self.assertEqual(err["code"], "validation")
+        self.assertEqual(err["kind"], "validation")   # legacy alias
+        self.assertTrue(err["hint"])
+        self.assertRegex(err["request_id"], r"^[0-9a-f]{12}$")
+        # success responses carry the request id header too
+        code, hdrs, _ = self.api.raw("GET", "/api/health")
+        self.assertEqual(code, 200)
+        self.assertRegex(self._hdr(hdrs).get("x-request-id", ""),
+                         r"^[0-9a-f]{12}$")
+
+    def test_head_probe(self):
+        """HEAD answers with the GET headers and no body — agent probes."""
+        code, hdrs, body = self.api.raw("HEAD", "/index.md")
+        self.assertEqual(code, 200)
+        self.assertIn("text/markdown", self._hdr(hdrs)["content-type"])
+        self.assertEqual(body, "")
+        code, hdrs, body = self.api.raw("HEAD", "/api/health")
+        self.assertEqual(code, 200)
+        self.assertIn("application/json", self._hdr(hdrs)["content-type"])
+        self.assertEqual(body, "")
+        code, hdrs, _ = self.api.raw("HEAD", "/nope")
+        self.assertEqual(code, 404)
+
+    def test_error_page_negotiation(self):
+        # JSON-asking client gets the JSON envelope on a bad path
+        code, hdrs, body = self.api.raw(
+            "GET", "/no/such/page", headers={"Accept": "application/json"})
+        self.assertEqual(code, 404)
+        self.assertIn("application/json", self._hdr(hdrs)["content-type"])
+        data = json.loads(body)
+        self.assertEqual(data["error"]["code"], "not_found")
+        self.assertIn("request_id", data["error"])
+        # markdown-asking client gets a markdown 404 with the request id
+        code, hdrs, body = self.api.raw(
+            "GET", "/no/such/page", headers={"Accept": "text/markdown"})
+        self.assertEqual(code, 404)
+        self.assertIn("text/markdown", self._hdr(hdrs)["content-type"])
+        self.assertIn("# 404", body)
+        self.assertIn("Request id:", body)
+        # bare curl (no Accept, no browser UA) gets the markdown 404
+        code, _, body = self.api.raw("GET", "/no/such/page")
+        self.assertEqual(code, 404)
+        self.assertIn("# 404", body)
+        # a browser gets an HTML 404
+        code, _, body = self.api.raw(
+            "GET", "/no/such/page", headers={"User-Agent": "Mozilla/5.0"})
+        self.assertEqual(code, 404)
+        self.assertIn("<!DOCTYPE html>", body)
 
 
 if __name__ == "__main__":

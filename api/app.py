@@ -75,12 +75,34 @@ def load_config(explicit: str | None = None) -> dict:
 
 
 # ---------------------------------------------------------------- helpers
+# Stable machine-readable hints for the error envelope (see error_json).
+ERROR_HINTS = {
+    "bad_request": "The request body is not valid JSON, or it exceeds the size limit.",
+    "validation": "Fix the listed fields and retry.",
+    "auth": "Send a valid X-Agency-Secret header (public writes) or X-Admin-Key (admin actions).",
+    "forbidden": "Your key is valid but cannot do this — admin actions need X-Admin-Key.",
+    "rate_limit": "Slow down and retry later.",
+    "conflict": "Resolve the conflict (e.g. pick another hostname) and retry.",
+    "not_found": "No such route or resource — check the path or id.",
+    "proxmox": "The Proxmox node refused the operation; fix the node-side cause and retry.",
+    "internal": "Unexpected server error — include the request_id when reporting it.",
+}
+
+# Tie-breaking order for Accept negotiation (HTML wins ties, as browsers do).
+_KIND_RANK = {"text/html": 0, "text/markdown": 1, "application/json": 2}
+
+
 def public_agent(agent: dict) -> dict:
     return {k: agent.get(k) for k in PUBLIC_FIELDS if k in agent}
 
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
+
+
+def new_request_id() -> str:
+    """Short collision-resistant id tagging every HTTP response."""
+    return uuid.uuid4().hex[:12]
 
 
 def validate_request(body: dict) -> list[str]:
@@ -152,6 +174,14 @@ class AgencyHandler(BaseHTTPRequestHandler):
     server_version = "AGENCY/0.3"
     protocol_version = "HTTP/1.1"
 
+    def __init__(self, *args, **kwargs):
+        # Set before super() — on CPython >= 3.14 socketserver invokes
+        # handle() from within BaseRequestHandler.__init__, i.e. while this
+        # constructor is still on the stack.
+        self.request_id = new_request_id()
+        self._head = False
+        super().__init__(*args, **kwargs)
+
     # ------------------------------------------------------------ state
     @property
     def state(self) -> dict:
@@ -162,8 +192,38 @@ class AgencyHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Agency-Secret, X-Admin-Key")
+        self.send_header("X-Request-Id", self.request_id)
         if no_cache:
             self.send_header("Cache-Control", "no-store")
+
+    def _negotiated_kind(self) -> str:
+        """Pick the response format this client asked for.
+
+        Explicit Accept q-values among text/html, text/markdown and
+        application/json win (top q, ties in that order). With no stated
+        preference (no header, or only `*/*`) the User-Agent decides:
+        browsers get HTML, agents get markdown. The JSON API itself never
+        negotiates.
+        """
+        scores = {"text/html": 0.0, "text/markdown": 0.0, "application/json": 0.0}
+        saw_explicit = False
+        for token in (self.headers.get("Accept") or "").split(","):
+            parts = [p.strip() for p in token.split(";")]
+            name = parts[0].lower()
+            q = 1.0
+            for attr in parts[1:]:
+                if attr.startswith("q="):
+                    try:
+                        q = float(attr[2:])
+                    except ValueError:
+                        q = 0.0
+            if name in scores and q > 0:
+                scores[name] = max(scores[name], q)
+                saw_explicit = True
+        if saw_explicit:
+            return max(scores, key=lambda k: (scores[k], -_KIND_RANK[k]))
+        ua = (self.headers.get("User-Agent") or "")
+        return "text/html" if "Mozilla" in ua else "text/markdown"
 
     def send_json(self, code: int, obj: dict) -> None:
         body = json.dumps(obj).encode("utf-8")
@@ -172,10 +232,18 @@ class AgencyHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if not getattr(self, "_head", False):
+            self.wfile.write(body)
 
-    def error_json(self, code: int, message: str, kind: str = "error") -> None:
-        self.send_json(code, {"ok": False, "error": {"kind": kind, "message": message}})
+    def error_json(self, code: int, message: str, kind: str = "error",
+                    hint: str | None = None) -> None:
+        self.send_json(code, {"ok": False, "error": {
+            "code": kind,
+            "kind": kind,  # legacy alias — old clients keep working
+            "message": message,
+            "hint": hint if hint is not None else ERROR_HINTS.get(kind, ""),
+            "request_id": self.request_id,
+        }})
 
     def read_body(self, max_bytes: int = 32 * 1024) -> dict | None:
         try:
@@ -239,6 +307,8 @@ class AgencyHandler(BaseHTTPRequestHandler):
         cfg = self.state["cfg"]
         store = self.state["store"]
         pve = self.state["pve"]
+        if method == "HEAD":
+            method = "GET"  # reads answer HEAD with their headers, no body
         parts = [p for p in path.split("/") if p]  # ['api', 'agents', '<id>', ...]
 
         try:
@@ -371,7 +441,7 @@ class AgencyHandler(BaseHTTPRequestHandler):
             if method == "POST" and len(parts) == 4 and parts[:2] == ["api", "agents"] \
                     and parts[3] == "confirm-payment":
                 if not self._admin_ok():
-                    return self.error_json(403, "bad or missing X-Admin-Key", "auth")
+                    return self.error_json(403, "bad or missing X-Admin-Key", "forbidden")
                 agent = store.get(parts[2])
                 if not agent:
                     return self.error_json(404, "no such agent", "not_found")
@@ -387,7 +457,7 @@ class AgencyHandler(BaseHTTPRequestHandler):
             if method == "POST" and len(parts) == 4 and parts[:2] == ["api", "agents"] \
                     and parts[3] == "retry":
                 if not self._admin_ok():
-                    return self.error_json(403, "bad or missing X-Admin-Key", "auth")
+                    return self.error_json(403, "bad or missing X-Admin-Key", "forbidden")
                 agent = store.get(parts[2])
                 if not agent:
                     return self.error_json(404, "no such agent", "not_found")
@@ -405,7 +475,7 @@ class AgencyHandler(BaseHTTPRequestHandler):
             if method == "POST" and len(parts) == 4 and parts[:2] == ["api", "agents"] \
                     and parts[3] == "destroy":
                 if not self._admin_ok():
-                    return self.error_json(403, "bad or missing X-Admin-Key", "auth")
+                    return self.error_json(403, "bad or missing X-Admin-Key", "forbidden")
                 agent = store.get(parts[2])
                 if not agent:
                     return self.error_json(404, "no such agent", "not_found")
@@ -425,18 +495,39 @@ class AgencyHandler(BaseHTTPRequestHandler):
         return self.error_json(404, "unknown api route", "not_found")
 
     # ----------------------------------------------------------- static
+    # Canonical agent reference — the markdown twin of the landing page
+    # and the body of `/llms-full.txt`. Only one copy of the docs exists.
+    MARKDOWN_TWIN = "docs/agents.md"
+
     def _static(self, path: str):
-        root = self.state["website_dir"]
         rel = unquote(urlparse(path).path.lstrip("/") or "index.html")
+        kind = self._negotiated_kind()
+
+        # The whole agent reference in one fetch: index + this page.
+        if rel == "llms-full.txt":
+            return self._send_llms_full()
+
+        # The docs page: raw markdown, or a markdown answer for agents.
+        if rel == "docs/agents" or (rel == "docs" and kind == "text/markdown"):
+            return self._send_file(self.MARKDOWN_TWIN, "text/markdown; charset=utf-8")
+
+        # The landing page answers in markdown when asked (or as /index.md).
+        if rel == "index.md" or (rel == "index.html" and kind == "text/markdown"):
+            return self._send_file(self.MARKDOWN_TWIN, "text/markdown; charset=utf-8")
+
+        # Everything else: real files from the website directory.
+        root = self.state["website_dir"]
         candidate = os.path.realpath(os.path.join(root, rel))
         if candidate != root and not candidate.startswith(root + os.sep):
-            return self.error_json(403, "forbidden", "forbidden")
+            return self._send_error_page(403, "forbidden", "forbidden")
         if os.path.isdir(candidate):
             candidate = os.path.join(candidate, "index.html")
         if not os.path.isfile(candidate):
-            self.send_error(404)
-            return
+            return self._send_error_page(
+                404, f"no page at `/{rel}`", "not_found")
         ctype = mimetypes.guess_type(candidate)[0] or "application/octet-stream"
+        if candidate.endswith(".md"):
+            ctype = "text/markdown; charset=utf-8"
         with open(candidate, "rb") as fh:
             body = fh.read()
         self.send_response(200)
@@ -444,9 +535,91 @@ class AgencyHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if not getattr(self, "_head", False):
+            self.wfile.write(body)
+
+    def _send_file(self, rel: str, ctype: str) -> None:
+        """Serve one file from the website directory, traversal-guarded."""
+        root = os.path.realpath(self.state["website_dir"])
+        candidate = os.path.realpath(os.path.join(root, rel))
+        if candidate != root and not candidate.startswith(root + os.sep):
+            return self._send_error_page(403, "forbidden", "forbidden")
+        if not os.path.isfile(candidate):
+            return self._send_error_page(404, f"no page at `/{rel}`", "not_found")
+        with open(candidate, "rb") as fh:
+            body = fh.read()
+        self.send_response(200)
+        self._headers(no_cache=False)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if not getattr(self, "_head", False):
+            self.wfile.write(body)
+
+    def _send_llms_full(self) -> None:
+        """Assemble /llms-full.txt from the index + the agent reference.
+
+        Assembled at request time so the single-fetch contract never drifts
+        from the pages it documents.
+        """
+        root = self.state["website_dir"]
+        parts = []
+        for rel in ("llms.txt", self.MARKDOWN_TWIN):
+            with open(os.path.join(root, rel), "r", encoding="utf-8") as fh:
+                parts.append(fh.read().rstrip())
+        body = ("\n\n---\n\n".join(parts) + "\n").encode("utf-8")
+        self.send_response(200)
+        self._headers(no_cache=False)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if not getattr(self, "_head", False):
+            self.wfile.write(body)
+
+    def _send_error_page(self, code: int, message: str, kind: str = "not_found") -> None:
+        """404/403 for non-API paths, answered in the format the client wants."""
+        best = self._negotiated_kind()
+        if best == "application/json":
+            return self.error_json(code, message, kind)
+        ctype = {
+            "text/markdown": "text/markdown; charset=utf-8",
+            "text/html": "text/html; charset=utf-8",
+        }[best]
+        if best == "text/markdown":
+            body = (
+                f"# {code}: {message}\n\n"
+                f"{self.headers.get('Host', 'this node')} has no page here. "
+                "Where to look instead:\n\n"
+                "- Home (markdown for agents): /index.md\n"
+                "- Agent reference: /docs/agents.md\n"
+                "- Agent index: /llms.txt\n"
+                "- Everything in one fetch: /llms-full.txt\n"
+                "- API (JSON): /api/health\n\n"
+                f"Request id: {self.request_id}\n"
+            ).encode("utf-8")
+        else:
+            body = (
+                "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+                f"<title>{code}</title></head><body>"
+                f"<h1>{code}</h1><p>{message}</p>"
+                "<p>Try <a href=\"/\">the site</a>, "
+                "<a href=\"/docs/agents.md\">the agent reference</a>, "
+                "or <a href=\"/llms.txt\">/llms.txt</a>.</p>"
+                "</body></html>"
+            ).encode("utf-8")
+        self.send_response(code)
+        self._headers()
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if not getattr(self, "_head", False):
+            self.wfile.write(body)
 
     # ------------------------------------------------------------ verbs
+    def do_HEAD(self):
+        """HEAD answers with GET's headers and no body — an agent probe."""
+        self._head = True
+        self._route("HEAD", urlparse(self.path).path)
     def do_GET(self):
         self._route("GET", urlparse(self.path).path)
 

@@ -1,0 +1,41 @@
+# AGENCY
+
+> Homes for autonomous agents — a self-hosted container-hosting website and
+> provisioning API on your Proxmox VE node. First home free; later homes
+> quoted in USDC/USDT with a unique payment reference.
+>
+> Everything below resolves on the node's own origin. This index follows the
+> llmstxt.org spec; `/llms-full.txt` is the whole reference in one fetch.
+
+## Introduction
+
+- [Agent Home Overview](/): AGENCY spins up small, dedicated, unprivileged LXC
+  container homes for AI agents — 2 GB RAM, up to 8 GB disk, full shared CPU
+  pool. The first home provisions instantly; every later home gets a
+  machine-readable USDC/USDT quote with a unique payment memo.
+
+## Agents
+
+- [Agent Reference](/docs/agents): drive AGENCY from a shell — endpoints,
+  authentication headers, the machine-readable error envelope, content
+  negotiation, and a complete curl walkthrough from request to running home.
+- [Complete Reference](/llms-full.txt): this index plus the full agent
+  reference concatenated, for a single-fetch agent bootstrap.
+
+## API (JSON)
+
+- [Health](/api/health): node CPU/memory, live agent counts, free-tier usage,
+  Proxmox reachability. No auth.
+- [Stacks](/api/stacks): the curate-your-stack catalog — baked groups,
+  selectable add-ons, venv option, max. No auth.
+- [Agents](/api/agents): request a home (POST, needs `X-Agency-Secret`), list
+  all agents (GET, no PII), inspect one (`GET /api/agents/<id>`).
+- [Admin](/api/agents/<id>/confirm-payment): mark a USDC/USDT transfer paid and
+  provision (needs `X-Admin-Key`), plus `retry` and `destroy` for the same key.
+
+## Conventions
+
+Every response carries an `X-Request-Id` header; every error body embeds it and
+a stable machine `code` plus a `hint`. Pages answer in markdown when you ask for
+it (`Accept: text/markdown`, or any non-browser client). More in
+[the agent reference](/docs/agents).
