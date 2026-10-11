@@ -10,10 +10,11 @@ container homes for AI agents on your own [Proxmox VE] node.
 - Agents get **2 GB RAM**, the **full shared CPU pool**, and **up to 8 GB
   disk** to start (all configurable).
 - **Plan tiers** — `micro` / `nano` / `standard` (RAM · disk · cores →
-  USD/hour) replace fixed sizing; quoted on every request.
-- **Metered per second** — the watchdog charges running homes at their
-  plan's $/hr, keeps a per-home ledger + statement, warns on low balance,
-  halts the container at zero credit, and executes scheduled destroys (TTL).
+  USD/month, mainstream-competitive specs) replace fixed sizing.
+- **Prepaid periods** — clients pay up front weekly / fortnightly / monthly;
+  the watchdog warns as the prepaid window runs out (`expiring`), halts the
+  container at the deadline, keeps a per-home ledger + statement, and
+  executes scheduled destroys (TTL).
 - Runs with **zero third-party dependencies** — Python 3 standard library
   only. No npm, no pip, no database.
 - **Agent-native by default** — `/llms.txt` + `/llms-full.txt` (llmstxt.org),
@@ -142,15 +143,15 @@ admin calls need `X-Admin-Key: <admin_key>`.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `GET` | `/api/health` | — | node CPU/mem, storage free, live agent counts, plans, free-tier usage |
-| `GET` | `/api/plans` | — | plan tiers: RAM / disk / cores / price-per-hour, default, deposit |
+| `GET` | `/api/health` | — | node CPU/mem, storage free, live agent counts, plans/periods, free-tier usage |
+| `GET` | `/api/plans` | — | plan tiers (RAM/disk/cores → $/mo), billing periods, period prices, default plan/period |
 | `GET` | `/api/stacks` | — | curate-your-stack catalog: baked groups, selectable add-ons, venv option, max |
-| `POST` | `/api/agents` | site secret | request an agent home (free → auto-provision, later → quote); body may include `"plan"` + `"stack"` |
+| `POST` | `/api/agents` | site secret | request an agent home (free → auto-provision, later → quote); body may include `"plan"` + `"period"` + `"stack"` |
 | `GET` | `/api/agents` | — | all agent summaries (no PII, no SSH keys) |
-| `GET` | `/api/agents/:id` | — | one agent: status, IP, specs, plan, credit balance |
-| `POST` | `/api/agents/:id/confirm-payment` | admin | mark USDC/USDT paid → credit + provision |
+| `GET` | `/api/agents/:id` | — | one agent: status, IP, specs, plan, prepaid window (`paid_until`/`remaining_s`) |
+| `POST` | `/api/agents/:id/confirm-payment` | admin | mark USDC/USDT paid → prepay the quoted period + provision |
 | `GET` | `/api/agents/:id/statement` | admin | per-home billing statement (ledger, newest first) |
-| `POST` | `/api/agents/:id/renew` | admin | add credit (`amount_usd` or `hours`); restarts a halted home |
+| `POST` | `/api/agents/:id/renew` | admin | extend the prepaid window (`{"period": "weekly", "periods": N}` or `{"days": N}`); restarts a halted home |
 | `POST` | `/api/agents/:id/schedule-destroy` | admin | `{"ttl_seconds": N}` / `{"destroy_at": epoch}` / `{"cancel": true}` |
 | `POST` | `/api/agents/:id/retry` | admin | retry a failed provisioning (record keeps the real error) |
 | `POST` | `/api/agents/:id/destroy` | admin | delete the LXC, reclaim disk |
@@ -211,13 +212,17 @@ tables above if they ever disagree.
 ## Agent-home specs — the plans (`config.json` → `plans`)
 
 Sizing, CPU share and price all come from the plan the customer picks (or
-`billing.default_plan`). Plans: RAM/disk/cores/cpuunits → `price_usd_per_hour`.
+`billing.default_plan`). Prices are **per month**; the customer pays for a
+billing period (weekly / fortnightly / monthly) up front.
 
-| Plan | `memory_mb` | `disk_gb` | `cores` | `cpuunits` | `price_usd_per_hour` |
-|---|---|---|---|---|---|
-| `micro` | 512 | 4 | 1 | 256 | $0.05 |
-| `nano` | 1024 | 6 | 2 | 512 | $0.10 |
-| `standard` | 2048 | 8 | 0 (all host, shared) | 1024 | $0.30 |
+| Plan | `memory_mb` | `disk_gb` | `cores` | `cpuunits` | `price_usd_per_month` | ~$/hr equiv |
+|---|---|---|---|---|---|---|
+| `micro` | 1024 | 30 | 1 | 256 | $8 | $0.011 |
+| `nano` | 4096 | 50 | 4 | 1024 | $16 | $0.022 |
+| `standard` | 8192 | 64 | 8 | 2048 | $32 | $0.044 |
+
+For reference: Hetzner ARM ~$17/mo, DO droplet ~$24/mo (80 GB) — AGENCY's
+nano/standard sit right in the mainstream-competitive band.
 
 Other home knobs (all in `config.json`):
 
@@ -288,22 +293,23 @@ detect the vnet and can even create it: `SDN_ZONE=<zone> ./proxmox/setup.sh`).
 
 ## Billing model
 
-Metered, per-second, credit-based (see `website/docs/agents.md` for the full
+Prepaid periods, up front (see `website/docs/agents.md` for the full
 contract):
 
-- **Credit up front.** Free homes buy `billing.free_credit_usd` (default
-  $2.00) of run-time credit; paid homes get the **confirmed quote amount**
-  (`plan.price_usd_per_hour × billing.deposit_hours`, default 24h) when
-  `confirm-payment` lands. `free_credit_usd: 0` = unmetered homes;
-  `billing.metered: false` switches the whole ticker off (legacy flat model).
-- **The ticker** (watchdog, `billing.tick_interval_s` default 60s) meters
-  each running home in fractional seconds at its plan's $/hr, debits credit
-  into a per-home ledger, and flags `balance_low` under
-  `low_balance_warn_usd`. At zero credit the container is stopped and the
-  home `halted`; billing stops with it. Elapsed time is capped at
-  `max_backfill_s` (1 day) so a long outage can't bill the whole gap.
-- **Operate it.** `statement` reads the ledger; `renew` adds credit
-  (`amount_usd` or `hours`) and restarts a halted home;
+- **Pick a plan and a period.** `POST /api/agents` takes `plan` and
+  `period` (defaults: `billing.default_plan` / `billing.default_period`).
+  Period prices are the plan's `price_usd_per_month` × the period's
+  fraction (`billing.periods`: weekly 0.25, fortnightly 0.5, monthly 1.0).
+- **Prepaid window.** Free homes get `billing.free_periods` (default 1)
+  periods free; a paid quote's `amount` is the period price, and
+  `confirm-payment` opens the window: `paid_until = now + period.days`.
+- **The watchdog** checks every home's window: within `warn_before_s` (1d)
+  it sets `expiring`; at the deadline it stops the container and `halt`s
+  the home — billing stops with it. Nothing is metered per second.
+  Dev mode (no expiry): `free_tier_containers: 0` + `free_periods: 0`.
+- **Operate it.** `statement` reads the window + purchase ledger; `renew`
+  extends it (`{"period": "weekly", "periods": N}` or `{"days": N}`,
+  pro-rated at the monthly rate) and restarts a halted home;
   `schedule-destroy` is the TTL (`ttl_seconds`, `destroy_at`, or `cancel`).
 - Each paid quote carries a unique **`reference`** = the agent id. Ask
   customers to put it in the transfer memo, so an on-chain scan or a

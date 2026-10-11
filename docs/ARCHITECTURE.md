@@ -5,10 +5,11 @@
 1. A public website that accepts **inbound requests** and spins up small
    container homes for AI agents on a private Proxmox node.
 2. **Plan-sized homes**: customers pick micro / nano / standard
-   (RAM / disk / cores → USD/hour); strict per-plan limits, unprivileged LXC.
-3. **Metered billing**: credit up front (free tier or paid quote), a
-   per-second ticker, a ledger + statement per home, low-balance warnings,
-   an automatic halt at zero credit, and TTL scheduled destroys.
+   (RAM / disk / cores → USD/month, mainstream-competitive specs);
+   unprivileged LXC, disk preflighted.
+3. **Prepaid period billing**: pay up front weekly / fortnightly / monthly;
+   a prepaid-window watchdog (`expiring` → `halted`), a per-home ledger +
+   statement, renew, and TTL scheduled destroys.
 4. Zero-dependency deployment on a stock Debian/Proxmox node: Python 3
    stdlib only, one systemd service, one nginx vhost.
 
@@ -67,12 +68,10 @@ and calls `POST /api/agents/:id/retry` (admin) to re-run provisioning.
 Metering and lifecycle (same watchdog, next pass):
 
 ```
-status = running & metered
-        │  billing.tick every tick_interval_s
-        │  elapsed_s x price_per_hour / 3600 -> ledger entry
-        │  credit_usd -= … billed_total_usd += …
-        ├─ balance <= 0  → px.stop_lxc(vmid); status = halted (billing stops)
-        └─ balance < warn → balance_low = true
+status = running & paid_until set
+        │  billing.tick every poll pass
+        ├─ paid_until - now <= warn_before_s  → expiring = true (warns)
+        └─ paid_until <= now  → px.stop_lxc(vmid); status = halted
 
 any non-destroyed home with destroy_scheduled_at <= now
         └─ destroy_home() — the scheduled TTL executed by the watchdog
@@ -108,12 +107,12 @@ not from global config:
 
 ```
 ostemplate: local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst
-memory:     2048          # plan.memory_mb        (standard)
+memory:     8192          # plan.memory_mb        (standard)
 swap:       512
-disk:       8             # plan.disk_gb, preflighted against storage free space
-cores:      8             # plan.cores; 0 => all host cores, shared (detected)
-cpuunits:   1024          # plan.cpuunits — fair-share scheduling between homes
-rootfs:     local-lvm:8
+disk:       64            # plan.disk_gb, preflighted against storage free space
+cores:      8             # plan.cores
+cpuunits:   2048          # plan.cpuunits — fair-share scheduling between homes
+rootfs:     local-lvm:64
 net0:       name=eth0,bridge=vmbr0,firewall=0,ip=dhcp
 unprivileged: 1           # security default (community-scripts style)
 features:   nesting=1,keyctl=1
@@ -126,26 +125,28 @@ onboot:   0  start: 1
 and refuses to create when `avail` can't fit `disk_gb × (1 + headroom_pct/100)`,
 failing fast instead of half-creating a container.
 
-## Metered billing (plans.py + billing.py)
+## Prepaid period billing (plans.py + billing.py)
 
-Every home is created from a named plan (`plans.py`): `micro`/`nano`/`standard`
-map RAM/disk/cores/cpuunits to a USD-per-hour price, and the API stores the
-resolved specs + price on the agent record. Credit is bought up front — free
-homes get `free_credit_usd`, paid homes get the confirmed quote amount — and
-the watchdog's `billing.tick()` meters each running home in fractional
-seconds (`elapsed × price / 3600`) into a capped per-home ledger
-(`LEDGER_CAP = 200`), debiting `credit_usd` into `billed_total_usd`.
+Homes are created from a named plan plus a billing period
+(`plans.py`): `micro`/`nano`/`standard` map RAM/disk/cores/cpuunits to a
+**USD-per-month** price, and `billing.periods` maps `weekly`/`fortnightly`/
+`monthly` to day counts and month-fractions (0.25/0.5/1.0). The period price
+is `$/mo × fraction`; the API stores plan + period specs on the agent
+record and gives the home a prepaid window (`paid_until`):
 
 | Event | Consequence |
 |---|---|
-| balance ≤ `low_balance_warn_usd` | `balance_low: true` — warns, keeps running |
-| balance ≤ 0 | `px.stop_lxc()`, status `halted`, `halted_at` set — billing stops |
-| `renew` (+USD or +hours) | credit += amount; halted home restarts (`start_lxc`) and resumes metering |
+| free-tier creation | `free_periods` (default 1) prepaid at $0 — `credit_periods()` |
+| quote confirmed | `paid_until = now + period.days`; ledger entry with the quote id |
+| `paid_until - now ≤ warn_before_s` | `expiring: true` — warns, keeps running |
+| `paid_until ≤ now` | `px.stop_lxc()`, status `halted`, `halted_at` set — billing stops |
+| `renew` (period/count or days) | window extends contiguously (`base = max(paid_until, now)`); halted home restarts |
 | `destroy_scheduled_at` passes | `process_schedules()` → `destroy_home()` — the TTL, executed by the watchdog |
 
-Elapsed time is capped at `max_backfill_s` so a multi-day outage bills at
-most one day. The tick itself is write-cadenced by `tick_interval_s`
-(default 60s) so the JSON store isn't churned every watchdog pass.
+Nothing is metered per second — the ledger records purchases (period,
+`days`, `amount_usd`, note), capped at `LEDGER_CAP = 200`, and
+`statement` renders it newest-first. `price_usd_per_hour_equiv` is
+informational only ($/mo ÷ 730 h).
 
 ## State & safety
 
@@ -225,8 +226,8 @@ validation, hostname conflicts, destroy and PII-stripping are all asserted.
 The agent-native surfaces are covered too: `llms.txt`/`llms-full.txt`,
 the markdown twins, `Accept` negotiation (markdown vs HTML vs JSON, API
 never negotiates), the error envelope + `request_id`, HEAD probes and
-negotiated 404s. Phase-2 billing is covered end to end: plan catalog and
-selection, quote amount = plan × deposit hours, credit on confirm-payment,
-the metering ticker halting a home at zero credit, statements, renew
-(with restart), disk-space preflight failures, and scheduled destroys
-(TTL, cancel, past-date rejection, admin-only).
+negotiated 404s. Billing is covered end to end: plan + period catalog and
+validation, quote amount = period price, prepaid window on confirm,
+expiry warning → halt, statements, renew (period and days), disk-space
+preflight failures, and scheduled destroys (TTL, cancel, past-date
+rejection, admin-only).

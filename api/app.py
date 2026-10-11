@@ -32,9 +32,11 @@ from urllib.parse import unquote, urlparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from proxmox import Proxmox, ProxmoxError  # noqa: E402
-from billing import (balance_usd, renew as billing_renew,  # noqa: E402
+from billing import (credit_periods,  # noqa: E402
+                     renew as billing_renew, remaining_s,
                      statement as billing_statement, tick as billing_tick)
-from plans import default_plan, get_plan, plans_catalog, quote_amount  # noqa: E402
+from plans import (days_of, default_period, default_plan, get_period,  # noqa: E402
+                   get_plan, period_price, periods_catalog, plans_catalog)
 from provisioning import (destroy_home, poll_agent, process_schedules,  # noqa: E402
                           schedule_destroy_at, start_provision)
 from quotes import confirm as confirm_quote  # noqa: E402
@@ -49,8 +51,9 @@ SSH_KEY_PREFIXES = ("ssh-rsa ", "ssh-ed25519 ", "ecdsa-sha2-", "sk-ssh-", "sk-ec
 PUBLIC_FIELDS = (
     "id", "hostname", "status", "ip", "vmid", "cores", "memory_mb",
     "disk_gb", "cpuunits", "created_at", "updated_at", "email", "purpose",
-    "free_tier", "metered", "plan", "price_per_hour",
-    "credit_usd", "billed_total_usd", "balance_low", "halted_at",
+    "free_tier", "plan", "price_usd_per_month", "billing_period",
+    "period_days", "period_price_usd", "paid_until", "expiring",
+    "periods_bought", "billed_total_usd", "halted_at",
     "destroy_scheduled_at",
     "quote", "error", "task", "template", "stack",
     "stack_status",
@@ -101,8 +104,8 @@ _KIND_RANK = {"text/html": 0, "text/markdown": 1, "application/json": 2}
 
 def public_agent(agent: dict) -> dict:
     out = {k: agent.get(k) for k in PUBLIC_FIELDS if k in agent}
-    out["balance_usd"] = balance_usd(agent)
-    out["metered"] = bool(agent.get("metered"))
+    out["remaining_s"] = remaining_s(agent)
+    out["expiring"] = bool(agent.get("expiring"))
     return out
 
 
@@ -332,15 +335,15 @@ class AgencyHandler(BaseHTTPRequestHandler):
                 cat["max_groups"] = int(cfg.get("request", {}).get("max_stack_groups", 6))
                 return self.send_json(200, {"ok": True, **cat})
 
-            # ---- plan catalog (public, feeds the website + agents)
+            # ---- plan catalog (public; plans are priced per billing period)
             if method == "GET" and parts == ["api", "plans"]:
                 return self.send_json(200, {
                     "ok": True,
-                    "metered": bool(cfg["billing"].get("metered", True)),
                     "default_plan": default_plan(cfg),
-                    "deposit_hours": cfg["billing"].get("deposit_hours", 24),
-                    "free_credit_usd": cfg["billing"].get("free_credit_usd", 2.0),
-                    "low_balance_warn_usd": cfg["billing"].get("low_balance_warn_usd", 0.25),
+                    "default_period": default_period(cfg),
+                    "free_periods": cfg["billing"].get("free_periods", 1),
+                    "warn_before_s": cfg["billing"].get("warn_before_s", 86400),
+                    "periods": periods_catalog(cfg),
                     "plans": plans_catalog(cfg),
                 })
 
@@ -385,15 +388,15 @@ class AgencyHandler(BaseHTTPRequestHandler):
                     "rootfs_storage": cfg["proxmox"].get("rootfs_storage"),
                     "storage": storage,
                     "billing": {
-                        "metered": bool(cfg["billing"].get("metered", True)),
-                        "default_plan": default_plan(cfg),
-                        "deposit_hours": cfg["billing"].get("deposit_hours", 24),
-                        "free_credit_usd": cfg["billing"].get("free_credit_usd", 2.0),
+                        "default_period": default_period(cfg),
+                        "free_periods": cfg["billing"].get("free_periods", 1),
+                        "warn_before_s": cfg["billing"].get("warn_before_s", 86400),
+                        "periods": periods_catalog(cfg),
                         "plans": plans_catalog(cfg),
                     },
                     "agents": {
                         "alive": store.alive_count(),
-                        "metered": store.metered_count(),
+                        "billed": store.metered_count(),
                         "total": len(store.all()),
                     },
                     "free_tier": {
@@ -433,17 +436,17 @@ class AgencyHandler(BaseHTTPRequestHandler):
                 if stack_err:
                     return self.error_json(422, stack_err, "validation")
 
-                # plan tier: RAM / disk / cores / cpuunits -> $/hr
+                # plan tier + prepaid billing period (weekly/fortnightly/monthly)
                 requested_plan = str(body.get("plan") or "").strip().lower() \
                     or default_plan(cfg)
                 plan_spec, plan_err = get_plan(cfg, requested_plan)
                 if plan_err:
                     return self.error_json(422, plan_err, "validation")
-
-                metered_on = bool(billing.get("metered", True)) \
-                    and float(plan_spec["price_usd_per_hour"]) > 0
-                free_credit = float(billing.get("free_credit_usd", 2.0)) \
-                    if metered_on else 0.0
+                period, period_err = get_period(cfg, body.get("period"))
+                if period_err:
+                    return self.error_json(422, period_err, "validation")
+                period_days = days_of(cfg, period)
+                period_cost = period_price(cfg, plan_spec, period)
 
                 agent = {
                     "id": agent_id,
@@ -459,11 +462,13 @@ class AgencyHandler(BaseHTTPRequestHandler):
                     "disk_gb": int(plan_spec["disk_gb"]),
                     "cores": int(plan_spec["cores"]),
                     "cpuunits": int(plan_spec["cpuunits"]),
-                    "price_per_hour": float(plan_spec["price_usd_per_hour"]),
-                    "metered": metered_on,
-                    "credit_usd": free_credit if free_tier else 0.0,
+                    "price_usd_per_month": float(plan_spec["price_usd_per_month"]),
+                    "billing_period": period,
+                    "period_days": period_days,
+                    "period_price_usd": period_cost,
                     "billed_total_usd": 0.0,
-                    "balance_low": False,
+                    "periods_bought": 0,
+                    "expiring": False,
                     "ledger": [],
                     "free_tier": free_tier,
                     "created_at": int(time.time()),
@@ -471,13 +476,16 @@ class AgencyHandler(BaseHTTPRequestHandler):
                 }
 
                 if free_tier:
+                    free_periods = int(billing.get("free_periods", 1))
                     agent["status"] = "provisioning"
+                    if free_periods > 0:
+                        credit_periods(agent, free_periods, period_days,
+                                       price=0.0, label="free_tier")
                 else:
                     agent["status"] = "quote_required"
                     agent["quote"] = create_quote(
-                        agent_id, billing,
-                        amount_usd=quote_amount(cfg, plan_spec),
-                        plan=requested_plan)
+                        agent_id, billing, amount_usd=period_cost,
+                        plan=requested_plan, period=period, days=period_days)
 
                 store.add(agent)
 
@@ -517,15 +525,21 @@ class AgencyHandler(BaseHTTPRequestHandler):
                 if agent.get("status") != "quote_required":
                     return self.error_json(409, "agent is not awaiting payment", "conflict")
                 agent["quote"] = confirm_quote(agent["quote"], agent["id"])
+                days = int(agent["quote"].get("days") or agent.get("period_days") or 30)
                 amount = float(agent["quote"].get("amount") or 0.0)
+                now = time.time()
                 store.update(
                     agent["id"], status="provisioning",
-                    credit_usd=round(amount, 4) if agent.get("metered") else 0.0,
-                    billed_total_usd=0.0, balance_low=False,
-                    ledger=agent.get("ledger") or [])
+                    paid_until=now + days * 86400,
+                    periods_bought=1,
+                    billed_total_usd=round(amount, 2),
+                    expiring=False,
+                    ledger=[{"at": int(now), "days": days,
+                             "amount_usd": round(amount, 2),
+                             "note": f"quote {agent['quote']['id']}"}])
                 start_provision(store, cfg, pve, agent)
-                log.info("payment confirmed for %s — credited $%.2f, provisioning",
-                         agent["id"], amount)
+                log.info("payment confirmed for %s — prepaid %d days of %s, provisioning",
+                         agent["id"], days, agent.get("plan"))
                 return self.send_json(200, {"ok": True, "agent": public_agent(store.get(agent["id"]))})
 
             # ---- retry a failed provisioning (admin)
@@ -572,7 +586,7 @@ class AgencyHandler(BaseHTTPRequestHandler):
                 return self.send_json(200, {"ok": True,
                                             "statement": billing_statement(cfg, agent)})
 
-            # ---- renew credit / restart a halted home (admin)
+            # ---- renew the prepaid window / restart a halted home (admin)
             if method == "POST" and len(parts) == 4 and parts[:2] == ["api", "agents"] \
                     and parts[3] == "renew":
                 if not self._admin_ok():
@@ -583,20 +597,41 @@ class AgencyHandler(BaseHTTPRequestHandler):
                 body = self.read_body() or {}
                 if not isinstance(body, dict):
                     return self.error_json(400, "invalid JSON body", "bad_request")
-                amount = body.get("amount_usd")
-                if amount is None and body.get("hours") is not None:
+                days = None
+                amount = 0.0
+                count = 1
+                label = "renew"
+                if body.get("days") is not None:
                     try:
-                        amount = float(body["hours"]) * float(agent.get("price_per_hour") or 0)
+                        days = int(body["days"])
                     except (TypeError, ValueError):
-                        amount = None
-                try:
-                    amount = float(amount)
-                except (TypeError, ValueError):
+                        return self.error_json(
+                            422, "days must be an integer", "validation")
+                    amount = round(float(agent.get("price_usd_per_month") or 0)
+                                   * days / 30.0, 2)
+                    label = f"{days} days"
+                else:
+                    period, perr = get_period(cfg, body.get("period"))
+                    if perr:
+                        return self.error_json(422, perr, "validation")
+                    try:
+                        count = int(body.get("periods") or 1)
+                    except (TypeError, ValueError):
+                        return self.error_json(
+                            422, "periods must be an integer", "validation")
+                    if not 1 <= count <= 12:
+                        return self.error_json(
+                            422, "periods must be between 1 and 12", "validation")
+                    days = days_of(cfg, period) * count
+                    amount = period_price(cfg, {"price_usd_per_month":
+                                                agent.get("price_usd_per_month")},
+                                          period) * count
+                    label = f"{period} x{count} ({days} days)"
+                if not 1 <= days <= 366:
                     return self.error_json(
-                        422, "send amount_usd (USD) or hours (run time to buy)", "validation")
-                if not 0 < amount <= 100000:
-                    return self.error_json(422, "amount_usd must be > 0", "validation")
-                renewed = billing_renew(store, cfg, pve, agent, amount)
+                        422, "renewal must cover 1 to 366 days", "validation")
+                renewed = billing_renew(store, cfg, pve, agent, days, amount,
+                                        label, count=max(count, 1))
                 return self.send_json(200, {
                     "ok": True,
                     "agent": public_agent(renewed),

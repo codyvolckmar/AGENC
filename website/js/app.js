@@ -109,18 +109,20 @@
       row("status", statusLabel(agent.status)) +
       row("hostname", agent.hostname) +
       row("plan", esc(agent.plan || "—") +
-        (agent.price_per_hour ? " · " + fmtUsd(agent.price_per_hour) + "/hr" : "")) +
-      row("specs", agent.memory_mb + " MB RAM · " + agent.disk_gb + " GB disk · " + (agent.cores ? agent.cores : "—") + " shared cores") +
+        (agent.price_usd_per_month ? " · " + fmtUsd(agent.price_usd_per_month) + "/mo" : "")) +
+      row("specs", agent.memory_mb + " MB RAM · " + agent.disk_gb + " GB disk · " + (agent.cores ? agent.cores : "—") + " cores") +
+      row("billing", esc(agent.billing_period || "—") +
+        (agent.paid_until ? " · paid up to " + dateStr(agent.paid_until) : "")) +
       (agent.vmid ? row("vmid", agent.vmid) : "") +
       (agent.ip ? row("ip", agent.ip + '  <code style="border:none;background:none;padding:0;">ssh root@' + esc(agent.ip) + "</code>") : "") +
-      (agent.metered ? row("billed", fmtUsd(agent.billed_total_usd) + " of " + fmtUsd(agent.credit_usd) + " credit") : "") +
+      (agent.billed_total_usd ? row("billed to date", fmtUsd(agent.billed_total_usd)) : "") +
       stackLine +
       "</dl>";
     var warn = "";
     if (agent.status === "halted") {
-      warn = '<p style="color:var(--danger);font-size:13px;">⛔ halted — run-time credit is spent. Ask the operator to renew or destroy this home.</p>';
-    } else if (agent.balance_low) {
-      warn = '<p style="color:var(--warn);font-size:12.5px;">⚠ low balance — ' + fmtUsd(agent.balance_usd) + " left; the home halts when it reaches $0.</p>";
+      warn = '<p style="color:var(--danger);font-size:13px;">⛔ halted — prepaid period lapsed. Ask the operator to renew or destroy this home.</p>';
+    } else if (agent.expiring) {
+      warn = '<p style="color:var(--warn);font-size:12.5px;">⚠ prepaid period ends ' + dateStr(agent.paid_until) + " — renew before then or the home halts.</p>";
     }
     return (
       '<h3>' + statusDot(agent.status) + " " + esc(agent.hostname) + "</h3>" +
@@ -149,6 +151,7 @@
       ssh_key: form.ssh_key.value.trim(),
       stack: selectedStack(),
       plan: $("#plan-select").value || undefined,
+      period: $("#period-select").value || undefined,
     };
     var btn = form.querySelector("button[type=submit]");
     btn.disabled = true;
@@ -230,7 +233,13 @@
     if (ev.key === "Enter") $("#lookup-btn").click();
   });
 
-  /* plan picker ---------------------------------------------------------- */
+  /* plan + period pickers ------------------------------------------------ */
+  function dateStr(epoch) {
+    if (!epoch) return "—";
+    try { return new Date(epoch * 1000).toUTCString().slice(0, 16); }
+    catch (e) { return "—"; }
+  }
+
   var planSpecs = {};
   (function () {
     api("/api/plans").then(function (res) {
@@ -242,18 +251,35 @@
         opts.push("<option value=\"" + esc(p.id) + "\">" + esc(p.id) +
           " · " + p.memory_mb + " MB RAM · " + p.disk_gb + " GB disk · " +
           (p.cores ? p.cores + " cores" : "shared CPU") +
-          " · " + fmtUsd(p.price_usd_per_hour) + "/hr" + "</option>");
+          " · " + fmtUsd(p.price_usd_per_month) + "/mo" + "</option>");
       });
       sel.innerHTML = opts.join("");
       if (res.default_plan && planSpecs[res.default_plan]) {
         sel.value = res.default_plan;
       }
       var note = $("#plan-note");
-      if (note && res.free_credit_usd) {
-        note.textContent = "Free-tier homes start with " + fmtUsd(res.free_credit_usd) +
-          " of run-time credit; every plan is billed per second while the home is running.";
+      if (note) {
+        var fp = res.free_periods || 0;
+        note.textContent = fp
+          ? "First home is free for " + fp + " period" + (fp === 1 ? "" : "s") +
+            " — after that, pay up front per " + (res.default_period || "monthly") + "."
+          : "All homes are paid up front per period.";
       }
     }).catch(function () { /* plans down — form still works, server default applies */ });
+  })();
+
+  (function () {
+    api("/api/plans").then(function (res) {
+      var sel = $("#period-select");
+      if (!sel || !res.ok) return;
+      var opts = ['<option value="">choose a period…</option>'];
+      Object.keys(res.periods || {}).forEach(function (name) {
+        opts.push("<option value=\"" + esc(name) + "\">" + esc(name) +
+          " · " + res.periods[name].days + " days</option>");
+      });
+      sel.innerHTML = opts.join("");
+      if (res.default_period) sel.value = res.default_period;
+    }).catch(function () {});
   })();
 
   /* curate-your-stack picker ----------------------------------------------- */

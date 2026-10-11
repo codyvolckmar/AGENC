@@ -160,8 +160,17 @@ class AgencyTest(unittest.TestCase):
         self.assertIsNone(agent.get("quote"))
 
         agent = self.wait_status(agent["id"], "running")
-        self.assertEqual(agent["memory_mb"], 2048)
-        self.assertEqual(agent["disk_gb"], 8)
+        self.assertEqual(agent["memory_mb"], 8192)   # standard plan
+        self.assertEqual(agent["disk_gb"], 64)
+        self.assertEqual(agent["plan"], "standard")
+        self.assertEqual(agent["price_usd_per_month"], 32.0)
+        self.assertEqual(agent["billing_period"], "monthly")
+        self.assertEqual(agent["period_days"], 30)
+        self.assertEqual(agent["periods_bought"], 1)   # first period free
+        self.assertEqual(agent["billed_total_usd"], 0.0)
+        self.assertGreater(agent["remaining_s"], 28 * 86400)
+        self.assertLessEqual(agent["remaining_s"], 30 * 86400)
+        self.assertFalse(agent["expiring"])
         self.assertTrue(agent["vmid"])
         self.assertRegex(agent["ip"], r"^\d+\.\d+\.\d+\.\d+$")
 
@@ -194,14 +203,17 @@ class AgencyTest(unittest.TestCase):
 
         quote = agent["quote"]
         self.assertIn(quote["asset"], ("USDC", "USDT"))
-        self.assertEqual(quote["amount"], "7.20")   # standard $0.30 x 24h deposit
+        self.assertEqual(quote["amount"], "32.00")  # standard $32/mo, monthly period
         self.assertEqual(quote["plan"], "standard")
+        self.assertEqual(quote["period"], "monthly")
+        self.assertEqual(quote["days"], 30)
         self.assertRegex(quote["address"], r"^0x")
         self.assertEqual(quote["reference"], agent["id"])
         self.assertEqual(quote["status"], "pending")
         self.assertEqual(agent["plan"], "standard")
-        self.assertEqual(agent["price_per_hour"], 0.30)
-        self.assertAlmostEqual(agent["balance_usd"], 0.0, places=4)
+        self.assertEqual(agent["price_usd_per_month"], 32.0)
+        self.assertEqual(agent["billing_period"], "monthly")
+        self.assertIsNone(agent.get("paid_until"))   # nothing prepaid yet
 
         # payment must be confirmed by an operator/webhook
         code, _ = self.api.post(f"/api/agents/{agent['id']}/confirm-payment")
@@ -215,8 +227,10 @@ class AgencyTest(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(res["agent"]["quote"]["status"], "paid")
         self.assertEqual(res["agent"]["status"], "provisioning")
-        self.assertAlmostEqual(res["agent"]["credit_usd"], 7.20, places=4)
-        self.assertAlmostEqual(res["agent"]["balance_usd"], 7.20, places=4)
+        self.assertAlmostEqual(res["agent"]["billed_total_usd"], 32.0, places=2)
+        self.assertEqual(res["agent"]["periods_bought"], 1)
+        self.assertIsNotNone(res["agent"]["paid_until"])
+        self.assertGreater(res["agent"]["remaining_s"], 29 * 86400)
 
         agent = self.wait_status(agent["id"], "running")
         self.assertTrue(agent["ip"])
@@ -495,50 +509,65 @@ class AgencyTest(unittest.TestCase):
         code, res = self.api.get("/api/plans")
         self.assertEqual(code, 200)
         self.assertTrue(res["ok"])
-        self.assertTrue(res["metered"])
         self.assertEqual(res["default_plan"], "standard")
-        self.assertEqual(res["deposit_hours"], 24)
+        self.assertEqual(res["default_period"], "monthly")
+        self.assertEqual(res["free_periods"], 1)
+        self.assertEqual(list(res["periods"].keys()),
+                         ["weekly", "fortnightly", "monthly"])
+        self.assertEqual(res["periods"]["monthly"]["days"], 30)
         ids = [p["id"] for p in res["plans"]]
-        self.assertEqual(ids, ["micro", "nano", "standard"])  # sorted by price
+        self.assertEqual(ids, ["micro", "nano", "standard"])  # sorted by $/mo
         micro = next(p for p in res["plans"] if p["id"] == "micro")
-        self.assertEqual(micro["memory_mb"], 512)
-        self.assertEqual(micro["disk_gb"], 4)
-        self.assertEqual(micro["price_usd_per_hour"], 0.05)
-        self.assertEqual(micro["deposit_usd"], 1.2)          # 0.05 x 24h
+        self.assertEqual(micro["memory_mb"], 1024)
+        self.assertEqual(micro["disk_gb"], 30)
+        self.assertEqual(micro["cores"], 1)
+        self.assertEqual(micro["price_usd_per_month"], 8.0)
+        self.assertEqual(micro["price_usd_per_hour_equiv"], 0.011)
+        self.assertEqual(micro["period_prices"],
+                         {"weekly": 2.0, "fortnightly": 4.0, "monthly": 8.0})
+        nano = next(p for p in res["plans"] if p["id"] == "nano")
+        self.assertEqual((nano["memory_mb"], nano["disk_gb"], nano["cores"]),
+                         (4096, 50, 4))
         standard = next(p for p in res["plans"] if p["id"] == "standard")
-        self.assertEqual(standard["memory_mb"], 2048)
-        self.assertEqual(standard["disk_gb"], 8)
-        self.assertEqual(standard["cores"], 0)               # shared CPU pool
+        self.assertEqual(standard["memory_mb"], 8192)
+        self.assertEqual(standard["period_prices"]["monthly"], 32.0)
 
-    def test_plan_validation_and_selection(self):
-        # shared server's free slot is consumed by now -> quote_required,
-        # but the plan specs land on the record and drive the quote amount
+    def test_plan_and_period_validation(self):
+        # shared server's free slot is consumed by now -> quote_required, but
+        # the plan/period specs land on the record and drive the quote amount
         code, res = self.api.post("/api/agents", {
-            "hostname": "plan-micro-1", "email": "m@e.c", "plan": "micro",
+            "hostname": "plan-micro-1", "email": "m@e.c",
+            "plan": "micro", "period": "weekly",
         }, secret=SITE_SECRET)
         self.assertEqual(code, 201)
         agent = res["agent"]
         self.assertEqual(agent["plan"], "micro")
-        self.assertEqual(agent["memory_mb"], 512)
-        self.assertEqual(agent["disk_gb"], 4)
-        self.assertEqual(agent["price_per_hour"], 0.05)
+        self.assertEqual(agent["memory_mb"], 1024)
+        self.assertEqual(agent["disk_gb"], 30)
+        self.assertEqual(agent["price_usd_per_month"], 8.0)
+        self.assertEqual(agent["billing_period"], "weekly")
+        self.assertEqual(agent["period_days"], 7)
+        self.assertEqual(agent["period_price_usd"], 2.0)
         self.assertEqual(agent["status"], "quote_required")
         self.assertEqual(agent["quote"]["plan"], "micro")
-        self.assertEqual(agent["quote"]["amount"], "1.20")  # 0.05 x 24h
-        # unknown plan is rejected with a hint
+        self.assertEqual(agent["quote"]["period"], "weekly")
+        self.assertEqual(agent["quote"]["amount"], "2.00")
+        # unknown plan / unknown period are rejected with a hint
         code, res = self.api.post("/api/agents", {
             "hostname": "plan-bad-1", "email": "m@e.c", "plan": "jumbo",
         }, secret=SITE_SECRET)
         self.assertEqual(code, 422)
         self.assertIn("unknown plan", res["error"]["message"])
+        code, res = self.api.post("/api/agents", {
+            "hostname": "period-bad-1", "email": "m@e.c", "period": "yearly",
+        }, secret=SITE_SECRET)
+        self.assertEqual(code, 422)
+        self.assertIn("unknown billing period", res["error"]["message"])
 
-    def test_metered_billing_halt_renew_statement(self):
+    def test_period_billing_expiry_halt_renew_statement(self):
         with tempfile.TemporaryDirectory(prefix="agenc-bill-") as d:
             cfg = make_config(d)
             cfg["billing"]["free_tier_containers"] = 0
-            cfg["billing"]["free_credit_usd"] = 0.01   # a sliver of credit
-            cfg["billing"]["low_balance_warn_usd"] = 0.5
-            cfg["billing"]["tick_interval_s"] = 1
             srv, api = self._spin_server(cfg)
             try:
                 code, res = api.post("/api/agents", {
@@ -547,43 +576,69 @@ class AgencyTest(unittest.TestCase):
                 self.assertEqual(code, 201)
                 agent = res["agent"]
                 self.assertTrue(agent["free_tier"])
-                self.assertTrue(agent["metered"])
                 self.assertEqual(agent["plan"], "standard")
-                self.assertEqual(agent["credit_usd"], 0.01)
-                self._wait_status(api, agent["id"], "running")
-                # push the clock back 10 minutes: the watchdog halts it fast
+                self.assertEqual(agent["billing_period"], "monthly")
+                # the first period is free: a ~30-day prepaid window
+                a = self._wait_status(api, agent["id"], "running")
+                self.assertGreater(a["remaining_s"], 28 * 86400)
+                self.assertLessEqual(a["remaining_s"], 30 * 86400)
+                self.assertEqual(a["periods_bought"], 1)
+                self.assertEqual(a["billed_total_usd"], 0.0)
+                self.assertFalse(a["expiring"])
+                # push paid_until into the warn window -> expiring flag
                 srv.state["store"].update(agent["id"],
-                                           last_tick_at=time.time() - 600)
+                                           paid_until=time.time() + 100)
+                deadline = time.time() + 10
+                while time.time() < deadline:
+                    _, res = api.get(f"/api/agents/{agent['id']}")
+                    if res["agent"].get("expiring"):
+                        break
+                    time.sleep(0.3)
+                self.assertTrue(res["agent"]["expiring"])
+                # push it into the past -> the watchdog halts the home
+                srv.state["store"].update(agent["id"],
+                                           paid_until=time.time() - 10)
                 halted = self._wait_status(api, agent["id"], "halted")
-                self.assertEqual(halted["balance_usd"], 0.0)
-                self.assertGreater(halted["billed_total_usd"], 0)
-                self.assertLessEqual(halted["billed_total_usd"],
-                                     halted["credit_usd"])
-                # statement shows the ledger, plan and price
+                self.assertLess(halted["remaining_s"], 0)
+                self.assertFalse(halted["expiring"])
+                # statement shows the prepaid window + purchase ledger
                 code, _, body = api.raw(
                     "GET", f"/api/agents/{agent['id']}/statement",
                     headers={"X-Admin-Key": ADMIN_KEY})
                 self.assertEqual(code, 200)
                 st = json.loads(body)["statement"]
                 self.assertEqual(st["plan"], "standard")
-                self.assertEqual(st["price_usd_per_hour"], 0.30)
+                self.assertEqual(st["price_usd_per_month"], 32.0)
+                self.assertEqual(st["billing_period"], "monthly")
                 self.assertEqual(st["status"], "halted")
                 self.assertGreater(len(st["entries"]), 0)
-                self.assertAlmostEqual(st["billed_total_usd"],
-                                       halted["billed_total_usd"], places=4)
-                # renew +$1 restarts the home
+                self.assertEqual(st["entries"][0]["note"], "free_tier")
+                self.assertEqual(st["entries"][0]["amount_usd"], 0.0)
+                # renew weekly x2 restarts the home: +14 days at $8/week
                 code, res = api.post(f"/api/agents/{agent['id']}/renew",
-                                     {"amount_usd": 1.0}, admin=ADMIN_KEY)
+                                     {"period": "weekly", "periods": 2},
+                                     admin=ADMIN_KEY)
                 self.assertEqual(code, 200)
-                self.assertEqual(res["agent"]["status"], "running")
-                self.assertAlmostEqual(res["agent"]["balance_usd"], 1.0,
-                                       places=4)
-                # renew by hours also works: 2h x $0.30 = $0.60 more credit
+                a = res["agent"]
+                self.assertEqual(a["status"], "running")
+                self.assertGreater(a["remaining_s"], 13 * 86400)
+                self.assertLessEqual(a["remaining_s"], 14 * 86400)
+                self.assertEqual(a["periods_bought"], 3)       # 1 free + 2
+                self.assertAlmostEqual(a["billed_total_usd"], 16.0, places=2)
+                # renew by calendar days: 10 days, pro-rated at $32/mo.
+                # The window extends contiguously: 14 left + 10 = ~24 days.
                 code, res = api.post(f"/api/agents/{agent['id']}/renew",
-                                     {"hours": 2}, admin=ADMIN_KEY)
+                                     {"days": 10}, admin=ADMIN_KEY)
                 self.assertEqual(code, 200)
-                self.assertAlmostEqual(res["agent"]["credit_usd"], 1.61,
-                                       places=4)
+                a = res["agent"]
+                self.assertGreater(a["remaining_s"], 23 * 86400)
+                self.assertLessEqual(a["remaining_s"], 24 * 86400)
+                self.assertEqual(a["periods_bought"], 4)
+                self.assertAlmostEqual(a["billed_total_usd"], 26.67, places=2)
+                # a nonsense renewal is rejected
+                code, _ = api.post(f"/api/agents/{agent['id']}/renew",
+                                   {"days": 0}, admin=ADMIN_KEY)
+                self.assertEqual(code, 422)
             finally:
                 srv.shutdown()
                 srv.server_close()
