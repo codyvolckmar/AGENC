@@ -294,7 +294,8 @@ code {
 .form label > span { font: 600 13.5px var(--sans); }
 .form label > span em { color: var(--muted); font-weight: 400; }
 .form input,
-.form textarea {
+.form textarea,
+.form select {
   width: 100%;
   background: var(--panel);
   border: 1px solid var(--line-strong);
@@ -304,7 +305,8 @@ code {
   font: 14px var(--mono);
   resize: vertical;
 }
-.form input:focus, .form textarea:focus {
+.form select { appearance: none; padding-right: 34px; }
+.form input:focus, .form textarea:focus, .form select:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(93, 255, 157, 0.12);
@@ -362,6 +364,7 @@ code {
 .dot.provisioning { background: var(--warn); animation: pulse 1s infinite; }
 .dot.running { background: var(--accent); box-shadow: 0 0 10px var(--accent); }
 .dot.quote_required, .dot.awaiting_payment { background: var(--accent-2); }
+.dot.halted { background: var(--danger); }
 .dot.error { background: var(--danger); }
 .dot.destroyed { background: var(--muted); }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }

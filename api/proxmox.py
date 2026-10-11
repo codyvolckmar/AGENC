@@ -250,6 +250,34 @@ class Proxmox:
             return False
         return None
 
+    # ------------------------------------------------------------ storage
+    def storage_status(self, storage: str) -> dict:
+        """Free/total bytes on a storage pool (preflight disk headroom)."""
+        if self.dry_run:
+            self._sim("GET", f"/nodes/{self.node}/storage/{storage}/status")
+            return {"storage": storage, "enabled": 1,
+                    "total": 8 * 1024 ** 4, "used": 2 * 1024 ** 4,
+                    "avail": 6 * 1024 ** 4}
+        return self._request(
+            "GET",
+            f"/nodes/{self.node}/storage/{urllib.parse.quote(storage)}/status",
+        )
+
+    # ----------------------------------------------------------- lifecycle
+    def stop_lxc(self, vmid: int) -> None:
+        """Stop a container (billing halt). Async on PVE; fire-and-forget."""
+        if self.dry_run:
+            self._sim("POST", f"/nodes/{self.node}/lxc/{vmid}/status/stop")
+            return
+        self._request("POST", f"/nodes/{self.node}/lxc/{vmid}/status/stop")
+
+    def start_lxc(self, vmid: int) -> None:
+        """Start a container (renew after a halt). Async on PVE."""
+        if self.dry_run:
+            self._sim("POST", f"/nodes/{self.node}/lxc/{vmid}/status/start")
+            return
+        self._request("POST", f"/nodes/{self.node}/lxc/{vmid}/status/start")
+
     # ------------------------------------------------------------ misc
     def _next_seq(self) -> int:
         self._sim_counter[0] += 1

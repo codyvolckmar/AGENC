@@ -56,6 +56,7 @@
       awaiting_payment: "awaiting payment",
       provisioning: "spinning up container…",
       running: "online",
+      halted: "halted — credit exhausted",
       error: "error",
       destroyed: "destroyed",
     };
@@ -67,6 +68,10 @@
   }
 
   /* agent renderers ---------------------------------------------------- */
+  function fmtUsd(x) {
+    return (x === null || x === undefined) ? "—" : "$" + (+x).toFixed(2);
+  }
+
   function quoteBlock(quote) {
     if (!quote) return "";
     var rows =
@@ -103,14 +108,24 @@
     var body = "<dl>" +
       row("status", statusLabel(agent.status)) +
       row("hostname", agent.hostname) +
+      row("plan", esc(agent.plan || "—") +
+        (agent.price_per_hour ? " · " + fmtUsd(agent.price_per_hour) + "/hr" : "")) +
       row("specs", agent.memory_mb + " MB RAM · " + agent.disk_gb + " GB disk · " + (agent.cores ? agent.cores : "—") + " shared cores") +
       (agent.vmid ? row("vmid", agent.vmid) : "") +
       (agent.ip ? row("ip", agent.ip + '  <code style="border:none;background:none;padding:0;">ssh root@' + esc(agent.ip) + "</code>") : "") +
+      (agent.metered ? row("billed", fmtUsd(agent.billed_total_usd) + " of " + fmtUsd(agent.credit_usd) + " credit") : "") +
       stackLine +
       "</dl>";
+    var warn = "";
+    if (agent.status === "halted") {
+      warn = '<p style="color:var(--danger);font-size:13px;">⛔ halted — run-time credit is spent. Ask the operator to renew or destroy this home.</p>';
+    } else if (agent.balance_low) {
+      warn = '<p style="color:var(--warn);font-size:12.5px;">⚠ low balance — ' + fmtUsd(agent.balance_usd) + " left; the home halts when it reaches $0.</p>";
+    }
     return (
       '<h3>' + statusDot(agent.status) + " " + esc(agent.hostname) + "</h3>" +
       body +
+      warn +
       (agent.quote ? quoteBlock(agent.quote) : "") +
       (agent.error ? '<p style="color:var(--danger);font-size:13.5px;">' + esc(agent.error) + "</p>" : "") +
       '<p style="color:var(--muted);font-size:12.5px;margin-top:10px;">agent id: ' + esc(agent.id) + "</p>"
@@ -133,6 +148,7 @@
       purpose: form.purpose.value.trim(),
       ssh_key: form.ssh_key.value.trim(),
       stack: selectedStack(),
+      plan: $("#plan-select").value || undefined,
     };
     var btn = form.querySelector("button[type=submit]");
     btn.disabled = true;
@@ -213,6 +229,32 @@
   $("#agent-id").addEventListener("keydown", function (ev) {
     if (ev.key === "Enter") $("#lookup-btn").click();
   });
+
+  /* plan picker ---------------------------------------------------------- */
+  var planSpecs = {};
+  (function () {
+    api("/api/plans").then(function (res) {
+      var sel = $("#plan-select");
+      if (!sel || !res.ok) return;
+      var opts = ['<option value="">choose a plan…</option>'];
+      (res.plans || []).forEach(function (p) {
+        planSpecs[p.id] = p;
+        opts.push("<option value=\"" + esc(p.id) + "\">" + esc(p.id) +
+          " · " + p.memory_mb + " MB RAM · " + p.disk_gb + " GB disk · " +
+          (p.cores ? p.cores + " cores" : "shared CPU") +
+          " · " + fmtUsd(p.price_usd_per_hour) + "/hr" + "</option>");
+      });
+      sel.innerHTML = opts.join("");
+      if (res.default_plan && planSpecs[res.default_plan]) {
+        sel.value = res.default_plan;
+      }
+      var note = $("#plan-note");
+      if (note && res.free_credit_usd) {
+        note.textContent = "Free-tier homes start with " + fmtUsd(res.free_credit_usd) +
+          " of run-time credit; every plan is billed per second while the home is running.";
+      }
+    }).catch(function () { /* plans down — form still works, server default applies */ });
+  })();
 
   /* curate-your-stack picker ----------------------------------------------- */
   var stackLabels = {};

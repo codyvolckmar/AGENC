@@ -194,10 +194,14 @@ class AgencyTest(unittest.TestCase):
 
         quote = agent["quote"]
         self.assertIn(quote["asset"], ("USDC", "USDT"))
-        self.assertEqual(quote["amount"], "5.00")
+        self.assertEqual(quote["amount"], "7.20")   # standard $0.30 x 24h deposit
+        self.assertEqual(quote["plan"], "standard")
         self.assertRegex(quote["address"], r"^0x")
         self.assertEqual(quote["reference"], agent["id"])
         self.assertEqual(quote["status"], "pending")
+        self.assertEqual(agent["plan"], "standard")
+        self.assertEqual(agent["price_per_hour"], 0.30)
+        self.assertAlmostEqual(agent["balance_usd"], 0.0, places=4)
 
         # payment must be confirmed by an operator/webhook
         code, _ = self.api.post(f"/api/agents/{agent['id']}/confirm-payment")
@@ -211,6 +215,8 @@ class AgencyTest(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(res["agent"]["quote"]["status"], "paid")
         self.assertEqual(res["agent"]["status"], "provisioning")
+        self.assertAlmostEqual(res["agent"]["credit_usd"], 7.20, places=4)
+        self.assertAlmostEqual(res["agent"]["balance_usd"], 7.20, places=4)
 
         agent = self.wait_status(agent["id"], "running")
         self.assertTrue(agent["ip"])
@@ -464,6 +470,203 @@ class AgencyTest(unittest.TestCase):
             "GET", "/no/such/page", headers={"User-Agent": "Mozilla/5.0"})
         self.assertEqual(code, 404)
         self.assertIn("<!DOCTYPE html>", body)
+
+
+    # ------------------------------- phase 2: metered billing + lifecycle
+    @staticmethod
+    def _spin_server(cfg):
+        srv = build_server(cfg)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        return srv, Api(f"http://127.0.0.1:{srv.server_address[1]}")
+
+    @staticmethod
+    def _wait_status(api, agent_id, want, timeout=15):
+        deadline = time.time() + timeout
+        last = None
+        while time.time() < deadline:
+            _, last = api.get(f"/api/agents/{agent_id}")
+            if last["agent"]["status"] == want:
+                return last["agent"]
+            time.sleep(0.3)
+        raise AssertionError(f"agent {agent_id} never reached {want!r}; last={last}")
+
+    def test_plans_catalog(self):
+        code, res = self.api.get("/api/plans")
+        self.assertEqual(code, 200)
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["metered"])
+        self.assertEqual(res["default_plan"], "standard")
+        self.assertEqual(res["deposit_hours"], 24)
+        ids = [p["id"] for p in res["plans"]]
+        self.assertEqual(ids, ["micro", "nano", "standard"])  # sorted by price
+        micro = next(p for p in res["plans"] if p["id"] == "micro")
+        self.assertEqual(micro["memory_mb"], 512)
+        self.assertEqual(micro["disk_gb"], 4)
+        self.assertEqual(micro["price_usd_per_hour"], 0.05)
+        self.assertEqual(micro["deposit_usd"], 1.2)          # 0.05 x 24h
+        standard = next(p for p in res["plans"] if p["id"] == "standard")
+        self.assertEqual(standard["memory_mb"], 2048)
+        self.assertEqual(standard["disk_gb"], 8)
+        self.assertEqual(standard["cores"], 0)               # shared CPU pool
+
+    def test_plan_validation_and_selection(self):
+        # shared server's free slot is consumed by now -> quote_required,
+        # but the plan specs land on the record and drive the quote amount
+        code, res = self.api.post("/api/agents", {
+            "hostname": "plan-micro-1", "email": "m@e.c", "plan": "micro",
+        }, secret=SITE_SECRET)
+        self.assertEqual(code, 201)
+        agent = res["agent"]
+        self.assertEqual(agent["plan"], "micro")
+        self.assertEqual(agent["memory_mb"], 512)
+        self.assertEqual(agent["disk_gb"], 4)
+        self.assertEqual(agent["price_per_hour"], 0.05)
+        self.assertEqual(agent["status"], "quote_required")
+        self.assertEqual(agent["quote"]["plan"], "micro")
+        self.assertEqual(agent["quote"]["amount"], "1.20")  # 0.05 x 24h
+        # unknown plan is rejected with a hint
+        code, res = self.api.post("/api/agents", {
+            "hostname": "plan-bad-1", "email": "m@e.c", "plan": "jumbo",
+        }, secret=SITE_SECRET)
+        self.assertEqual(code, 422)
+        self.assertIn("unknown plan", res["error"]["message"])
+
+    def test_metered_billing_halt_renew_statement(self):
+        with tempfile.TemporaryDirectory(prefix="agenc-bill-") as d:
+            cfg = make_config(d)
+            cfg["billing"]["free_tier_containers"] = 0
+            cfg["billing"]["free_credit_usd"] = 0.01   # a sliver of credit
+            cfg["billing"]["low_balance_warn_usd"] = 0.5
+            cfg["billing"]["tick_interval_s"] = 1
+            srv, api = self._spin_server(cfg)
+            try:
+                code, res = api.post("/api/agents", {
+                    "hostname": "meter-1", "email": "m@e.c",
+                }, secret=SITE_SECRET)
+                self.assertEqual(code, 201)
+                agent = res["agent"]
+                self.assertTrue(agent["free_tier"])
+                self.assertTrue(agent["metered"])
+                self.assertEqual(agent["plan"], "standard")
+                self.assertEqual(agent["credit_usd"], 0.01)
+                self._wait_status(api, agent["id"], "running")
+                # push the clock back 10 minutes: the watchdog halts it fast
+                srv.state["store"].update(agent["id"],
+                                           last_tick_at=time.time() - 600)
+                halted = self._wait_status(api, agent["id"], "halted")
+                self.assertEqual(halted["balance_usd"], 0.0)
+                self.assertGreater(halted["billed_total_usd"], 0)
+                self.assertLessEqual(halted["billed_total_usd"],
+                                     halted["credit_usd"])
+                # statement shows the ledger, plan and price
+                code, _, body = api.raw(
+                    "GET", f"/api/agents/{agent['id']}/statement",
+                    headers={"X-Admin-Key": ADMIN_KEY})
+                self.assertEqual(code, 200)
+                st = json.loads(body)["statement"]
+                self.assertEqual(st["plan"], "standard")
+                self.assertEqual(st["price_usd_per_hour"], 0.30)
+                self.assertEqual(st["status"], "halted")
+                self.assertGreater(len(st["entries"]), 0)
+                self.assertAlmostEqual(st["billed_total_usd"],
+                                       halted["billed_total_usd"], places=4)
+                # renew +$1 restarts the home
+                code, res = api.post(f"/api/agents/{agent['id']}/renew",
+                                     {"amount_usd": 1.0}, admin=ADMIN_KEY)
+                self.assertEqual(code, 200)
+                self.assertEqual(res["agent"]["status"], "running")
+                self.assertAlmostEqual(res["agent"]["balance_usd"], 1.0,
+                                       places=4)
+                # renew by hours also works: 2h x $0.30 = $0.60 more credit
+                code, res = api.post(f"/api/agents/{agent['id']}/renew",
+                                     {"hours": 2}, admin=ADMIN_KEY)
+                self.assertEqual(code, 200)
+                self.assertAlmostEqual(res["agent"]["credit_usd"], 1.61,
+                                       places=4)
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
+    def test_disk_preflight_low_space(self):
+        with tempfile.TemporaryDirectory(prefix="agenc-disk-") as d:
+            cfg = make_config(d)
+            cfg["billing"]["free_tier_containers"] = 0
+            srv, api = self._spin_server(cfg)
+            try:
+                # a nearly-full storage (5 GB free < 8.8 GB needed for standard)
+                srv.state["pve"].storage_status = lambda storage: {
+                    "storage": storage, "enabled": 1, "total": 10 * 1024 ** 3,
+                    "used": 5 * 1024 ** 3, "avail": 5 * 1024 ** 3}
+                code, res = api.post("/api/agents", {
+                    "hostname": "lowdisk-1", "email": "l@e.c",
+                }, secret=SITE_SECRET)
+                self.assertEqual(code, 502)
+                self.assertIn("low on space", res["warning"])
+                # the record survives in error state with the real reason
+                _, res = api.get("/api/agents")
+                failed = [a for a in res["agents"] if a["hostname"] == "lowdisk-1"]
+                self.assertEqual(len(failed), 1)
+                self.assertEqual(failed[0]["status"], "error")
+                self.assertIn("low on space", failed[0]["error"])
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
+    def test_scheduled_destroy_ttl(self):
+        with tempfile.TemporaryDirectory(prefix="agenc-ttl-") as d:
+            cfg = make_config(d)
+            cfg["billing"]["free_tier_containers"] = 0
+            srv, api = self._spin_server(cfg)
+            try:
+                code, res = api.post("/api/agents", {
+                    "hostname": "ttl-1", "email": "t@e.c",
+                }, secret=SITE_SECRET)
+                self.assertEqual(code, 201)
+                agent = res["agent"]
+                self._wait_status(api, agent["id"], "running")
+                code, res = api.post(f"/api/agents/{agent['id']}/schedule-destroy",
+                                     {"ttl_seconds": 2}, admin=ADMIN_KEY)
+                self.assertEqual(code, 200)
+                self.assertIsNotNone(res["agent"]["destroy_scheduled_at"])
+                destroyed = self._wait_status(api, agent["id"], "destroyed")
+                self.assertIsNone(destroyed.get("destroy_scheduled_at"))
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
+    def test_scheduled_destroy_cancel_and_past(self):
+        with tempfile.TemporaryDirectory(prefix="agenc-ttl2-") as d:
+            cfg = make_config(d)
+            cfg["billing"]["free_tier_containers"] = 0
+            srv, api = self._spin_server(cfg)
+            try:
+                code, res = api.post("/api/agents", {
+                    "hostname": "ttl2-1", "email": "t@e.c",
+                }, secret=SITE_SECRET)
+                agent = self._wait_status(api, res["agent"]["id"], "running")
+                code, res = api.post(f"/api/agents/{agent['id']}/schedule-destroy",
+                                     {"destroy_at": int(time.time() + 3600)},
+                                     admin=ADMIN_KEY)
+                self.assertEqual(code, 200)
+                self.assertIsNotNone(res["agent"]["destroy_scheduled_at"])
+                # cancel: true clears it
+                code, res = api.post(f"/api/agents/{agent['id']}/schedule-destroy",
+                                     {"cancel": True}, admin=ADMIN_KEY)
+                self.assertEqual(code, 200)
+                self.assertIsNone(res["agent"]["destroy_scheduled_at"])
+                # a past destroy_at is rejected
+                code, _ = api.post(f"/api/agents/{agent['id']}/schedule-destroy",
+                                   {"destroy_at": int(time.time()) - 10},
+                                   admin=ADMIN_KEY)
+                self.assertEqual(code, 422)
+                # admin-key only
+                code, _ = api.post(f"/api/agents/{agent['id']}/schedule-destroy",
+                                   {"ttl_seconds": 60}, secret=SITE_SECRET)
+                self.assertEqual(code, 403)
+            finally:
+                srv.shutdown()
+                srv.server_close()
 
 
 if __name__ == "__main__":

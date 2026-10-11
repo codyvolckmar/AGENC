@@ -32,7 +32,11 @@ from urllib.parse import unquote, urlparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from proxmox import Proxmox, ProxmoxError  # noqa: E402
-from provisioning import destroy_home, poll_agent, start_provision  # noqa: E402
+from billing import (balance_usd, renew as billing_renew,  # noqa: E402
+                     statement as billing_statement, tick as billing_tick)
+from plans import default_plan, get_plan, plans_catalog, quote_amount  # noqa: E402
+from provisioning import (destroy_home, poll_agent, process_schedules,  # noqa: E402
+                          schedule_destroy_at, start_provision)
 from quotes import confirm as confirm_quote  # noqa: E402
 from quotes import create_quote  # noqa: E402
 from stacks import public_catalog, validate_stack  # noqa: E402
@@ -44,8 +48,11 @@ HOSTNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,40}[a-z0-9])?$")
 SSH_KEY_PREFIXES = ("ssh-rsa ", "ssh-ed25519 ", "ecdsa-sha2-", "sk-ssh-", "sk-ecdsa-")
 PUBLIC_FIELDS = (
     "id", "hostname", "status", "ip", "vmid", "cores", "memory_mb",
-    "disk_gb", "created_at", "updated_at", "email", "purpose",
-    "free_tier", "quote", "error", "task", "template", "stack",
+    "disk_gb", "cpuunits", "created_at", "updated_at", "email", "purpose",
+    "free_tier", "metered", "plan", "price_per_hour",
+    "credit_usd", "billed_total_usd", "balance_low", "halted_at",
+    "destroy_scheduled_at",
+    "quote", "error", "task", "template", "stack",
     "stack_status",
 )
 
@@ -93,7 +100,10 @@ _KIND_RANK = {"text/html": 0, "text/markdown": 1, "application/json": 2}
 
 
 def public_agent(agent: dict) -> dict:
-    return {k: agent.get(k) for k in PUBLIC_FIELDS if k in agent}
+    out = {k: agent.get(k) for k in PUBLIC_FIELDS if k in agent}
+    out["balance_usd"] = balance_usd(agent)
+    out["metered"] = bool(agent.get("metered"))
+    return out
 
 
 def new_id(prefix: str) -> str:
@@ -151,15 +161,19 @@ def build_state(cfg: dict) -> dict:
 
 # ------------------------------------------------------------- watchdog
 def watchdog_loop(state: dict, interval: float, stop: threading.Event) -> None:
+    """Advance provisioning, meter running homes, execute scheduled destroys."""
     while not stop.wait(interval):
         try:
             store, cfg, pve = state["store"], state["cfg"], state["pve"]
             for agent in store.all():
-                if agent.get("status") == "provisioning":
-                    try:
+                try:
+                    if agent.get("status") == "provisioning":
                         poll_agent(store, cfg, pve, agent)
-                    except ProxmoxError as exc:
-                        log.warning("poll failed for %s: %s", agent["id"], exc)
+                    elif agent.get("status") == "running":
+                        billing_tick(store, cfg, pve, agent)
+                except ProxmoxError as exc:
+                    log.warning("watchdog failed for %s: %s", agent["id"], exc)
+            process_schedules(store, cfg, pve)
         except Exception:  # never kill the watchdog
             log.exception("watchdog iteration failed")
 
@@ -318,6 +332,18 @@ class AgencyHandler(BaseHTTPRequestHandler):
                 cat["max_groups"] = int(cfg.get("request", {}).get("max_stack_groups", 6))
                 return self.send_json(200, {"ok": True, **cat})
 
+            # ---- plan catalog (public, feeds the website + agents)
+            if method == "GET" and parts == ["api", "plans"]:
+                return self.send_json(200, {
+                    "ok": True,
+                    "metered": bool(cfg["billing"].get("metered", True)),
+                    "default_plan": default_plan(cfg),
+                    "deposit_hours": cfg["billing"].get("deposit_hours", 24),
+                    "free_credit_usd": cfg["billing"].get("free_credit_usd", 2.0),
+                    "low_balance_warn_usd": cfg["billing"].get("low_balance_warn_usd", 0.25),
+                    "plans": plans_catalog(cfg),
+                })
+
             # ---- health
             if method == "GET" and parts == ["api", "health"]:
                 bridge = cfg["container"].get("net_bridge", "sandbox")
@@ -335,6 +361,15 @@ class AgencyHandler(BaseHTTPRequestHandler):
                     templates = len(pve.list_templates())
                 except ProxmoxError:
                     templates = None
+                storage = {"name": cfg["proxmox"].get("rootfs_storage"),
+                           "enabled": None, "avail_gb": None, "total_gb": None}
+                try:
+                    st = pve.storage_status(storage["name"])
+                    storage["enabled"] = bool(st.get("enabled", 1))
+                    storage["avail_gb"] = round(int(st.get("avail") or 0) / 1073741824, 1)
+                    storage["total_gb"] = round(int(st.get("total") or 0) / 1073741824, 1)
+                except ProxmoxError:
+                    pass
                 return self.send_json(200, {
                     "ok": True,
                     "dry_run": cfg["dry_run"],
@@ -348,8 +383,17 @@ class AgencyHandler(BaseHTTPRequestHandler):
                     "net_bridge": bridge,
                     "net_bridge_ok": pve.net_exists(bridge),
                     "rootfs_storage": cfg["proxmox"].get("rootfs_storage"),
+                    "storage": storage,
+                    "billing": {
+                        "metered": bool(cfg["billing"].get("metered", True)),
+                        "default_plan": default_plan(cfg),
+                        "deposit_hours": cfg["billing"].get("deposit_hours", 24),
+                        "free_credit_usd": cfg["billing"].get("free_credit_usd", 2.0),
+                        "plans": plans_catalog(cfg),
+                    },
                     "agents": {
                         "alive": store.alive_count(),
+                        "metered": store.metered_count(),
                         "total": len(store.all()),
                     },
                     "free_tier": {
@@ -389,6 +433,18 @@ class AgencyHandler(BaseHTTPRequestHandler):
                 if stack_err:
                     return self.error_json(422, stack_err, "validation")
 
+                # plan tier: RAM / disk / cores / cpuunits -> $/hr
+                requested_plan = str(body.get("plan") or "").strip().lower() \
+                    or default_plan(cfg)
+                plan_spec, plan_err = get_plan(cfg, requested_plan)
+                if plan_err:
+                    return self.error_json(422, plan_err, "validation")
+
+                metered_on = bool(billing.get("metered", True)) \
+                    and float(plan_spec["price_usd_per_hour"]) > 0
+                free_credit = float(billing.get("free_credit_usd", 2.0)) \
+                    if metered_on else 0.0
+
                 agent = {
                     "id": agent_id,
                     "hostname": hostname,
@@ -398,8 +454,17 @@ class AgencyHandler(BaseHTTPRequestHandler):
                     "meta": body.get("meta"),
                     "stack": stack or None,
                     "stack_status": None,
-                    "memory_mb": cfg["container"]["memory_mb"],
-                    "disk_gb": cfg["container"]["disk_gb"],
+                    "plan": requested_plan,
+                    "memory_mb": int(plan_spec["memory_mb"]),
+                    "disk_gb": int(plan_spec["disk_gb"]),
+                    "cores": int(plan_spec["cores"]),
+                    "cpuunits": int(plan_spec["cpuunits"]),
+                    "price_per_hour": float(plan_spec["price_usd_per_hour"]),
+                    "metered": metered_on,
+                    "credit_usd": free_credit if free_tier else 0.0,
+                    "billed_total_usd": 0.0,
+                    "balance_low": False,
+                    "ledger": [],
                     "free_tier": free_tier,
                     "created_at": int(time.time()),
                     "request_ip": self.client_address[0],
@@ -409,7 +474,10 @@ class AgencyHandler(BaseHTTPRequestHandler):
                     agent["status"] = "provisioning"
                 else:
                     agent["status"] = "quote_required"
-                    agent["quote"] = create_quote(agent_id, billing)
+                    agent["quote"] = create_quote(
+                        agent_id, billing,
+                        amount_usd=quote_amount(cfg, plan_spec),
+                        plan=requested_plan)
 
                 store.add(agent)
 
@@ -420,8 +488,9 @@ class AgencyHandler(BaseHTTPRequestHandler):
                         return self.send_json(502, {"ok": True, "created": True,
                                                      "agent": public_agent(store.get(agent_id)),
                                                      "warning": f"creation failed on node: {exc}"})
-                log.info("agent requested: %s free_tier=%s status=%s stack=%s",
-                         hostname, free_tier, agent["status"], agent.get("stack") or [])
+                log.info("agent requested: %s free_tier=%s plan=%s status=%s stack=%s credit=%.2f",
+                         hostname, free_tier, agent["plan"], agent["status"],
+                         agent.get("stack") or [], agent.get("credit_usd") or 0)
                 return self.send_json(201, {"ok": True, "created": True,
                                             "agent": public_agent(store.get(agent_id))})
 
@@ -448,9 +517,15 @@ class AgencyHandler(BaseHTTPRequestHandler):
                 if agent.get("status") != "quote_required":
                     return self.error_json(409, "agent is not awaiting payment", "conflict")
                 agent["quote"] = confirm_quote(agent["quote"], agent["id"])
-                store.update(agent["id"], status="provisioning")
+                amount = float(agent["quote"].get("amount") or 0.0)
+                store.update(
+                    agent["id"], status="provisioning",
+                    credit_usd=round(amount, 4) if agent.get("metered") else 0.0,
+                    billed_total_usd=0.0, balance_low=False,
+                    ledger=agent.get("ledger") or [])
                 start_provision(store, cfg, pve, agent)
-                log.info("payment confirmed for %s — provisioning", agent["id"])
+                log.info("payment confirmed for %s — credited $%.2f, provisioning",
+                         agent["id"], amount)
                 return self.send_json(200, {"ok": True, "agent": public_agent(store.get(agent["id"]))})
 
             # ---- retry a failed provisioning (admin)
@@ -485,6 +560,78 @@ class AgencyHandler(BaseHTTPRequestHandler):
                     return self.error_json(502, str(exc), "proxmox")
                 log.info("agent %s destroyed", agent["id"])
                 return self.send_json(200, {"ok": True, "agent": public_agent(store.get(agent["id"]))})
+
+            # ---- billing statement (admin)
+            if method == "GET" and len(parts) == 4 and parts[:2] == ["api", "agents"] \
+                    and parts[3] == "statement":
+                if not self._admin_ok():
+                    return self.error_json(403, "bad or missing X-Admin-Key", "forbidden")
+                agent = store.get(parts[2])
+                if not agent:
+                    return self.error_json(404, "no such agent", "not_found")
+                return self.send_json(200, {"ok": True,
+                                            "statement": billing_statement(cfg, agent)})
+
+            # ---- renew credit / restart a halted home (admin)
+            if method == "POST" and len(parts) == 4 and parts[:2] == ["api", "agents"] \
+                    and parts[3] == "renew":
+                if not self._admin_ok():
+                    return self.error_json(403, "bad or missing X-Admin-Key", "forbidden")
+                agent = store.get(parts[2])
+                if not agent:
+                    return self.error_json(404, "no such agent", "not_found")
+                body = self.read_body() or {}
+                if not isinstance(body, dict):
+                    return self.error_json(400, "invalid JSON body", "bad_request")
+                amount = body.get("amount_usd")
+                if amount is None and body.get("hours") is not None:
+                    try:
+                        amount = float(body["hours"]) * float(agent.get("price_per_hour") or 0)
+                    except (TypeError, ValueError):
+                        amount = None
+                try:
+                    amount = float(amount)
+                except (TypeError, ValueError):
+                    return self.error_json(
+                        422, "send amount_usd (USD) or hours (run time to buy)", "validation")
+                if not 0 < amount <= 100000:
+                    return self.error_json(422, "amount_usd must be > 0", "validation")
+                renewed = billing_renew(store, cfg, pve, agent, amount)
+                return self.send_json(200, {
+                    "ok": True,
+                    "agent": public_agent(renewed),
+                    "statement": billing_statement(cfg, store.get(agent["id"])),
+                })
+
+            # ---- schedule a destroy (admin) — the TTL / `--until` analog
+            if method == "POST" and len(parts) == 4 and parts[:2] == ["api", "agents"] \
+                    and parts[3] == "schedule-destroy":
+                if not self._admin_ok():
+                    return self.error_json(403, "bad or missing X-Admin-Key", "forbidden")
+                agent = store.get(parts[2])
+                if not agent:
+                    return self.error_json(404, "no such agent", "not_found")
+                body = self.read_body() or {}
+                if not isinstance(body, dict):
+                    return self.error_json(400, "invalid JSON body", "bad_request")
+                destroy_at = None
+                if not body.get("cancel"):
+                    try:
+                        if body.get("destroy_at") is not None:
+                            destroy_at = int(body["destroy_at"])
+                        elif body.get("ttl_seconds") is not None:
+                            destroy_at = int(time.time()) + int(body["ttl_seconds"])
+                        else:
+                            return self.error_json(
+                                422, "send destroy_at (epoch seconds), ttl_seconds, "
+                                     "or cancel: true", "validation")
+                    except (TypeError, ValueError):
+                        return self.error_json(
+                            422, "destroy_at / ttl_seconds must be integers", "validation")
+                    if destroy_at < int(time.time()):
+                        return self.error_json(422, "destroy_at must be in the future", "validation")
+                updated = schedule_destroy_at(store, agent, destroy_at)
+                return self.send_json(200, {"ok": True, "agent": public_agent(updated)})
 
         except ProxmoxError as exc:
             return self.error_json(502, str(exc), "proxmox")

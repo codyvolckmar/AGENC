@@ -9,6 +9,11 @@ container homes for AI agents on your own [Proxmox VE] node.
   with a unique payment reference.
 - Agents get **2 GB RAM**, the **full shared CPU pool**, and **up to 8 GB
   disk** to start (all configurable).
+- **Plan tiers** — `micro` / `nano` / `standard` (RAM · disk · cores →
+  USD/hour) replace fixed sizing; quoted on every request.
+- **Metered per second** — the watchdog charges running homes at their
+  plan's $/hr, keeps a per-home ledger + statement, warns on low balance,
+  halts the container at zero credit, and executes scheduled destroys (TTL).
 - Runs with **zero third-party dependencies** — Python 3 standard library
   only. No npm, no pip, no database.
 - **Agent-native by default** — `/llms.txt` + `/llms-full.txt` (llmstxt.org),
@@ -137,12 +142,16 @@ admin calls need `X-Admin-Key: <admin_key>`.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `GET` | `/api/health` | — | node CPU/mem, live agent counts, free-tier usage |
+| `GET` | `/api/health` | — | node CPU/mem, storage free, live agent counts, plans, free-tier usage |
+| `GET` | `/api/plans` | — | plan tiers: RAM / disk / cores / price-per-hour, default, deposit |
 | `GET` | `/api/stacks` | — | curate-your-stack catalog: baked groups, selectable add-ons, venv option, max |
-| `POST` | `/api/agents` | site secret | request an agent home (free → auto-provision, later → quote); body may include `"stack": [group ids]` |
+| `POST` | `/api/agents` | site secret | request an agent home (free → auto-provision, later → quote); body may include `"plan"` + `"stack"` |
 | `GET` | `/api/agents` | — | all agent summaries (no PII, no SSH keys) |
-| `GET` | `/api/agents/:id` | — | one agent: status, IP, quote |
-| `POST` | `/api/agents/:id/confirm-payment` | admin | mark USDC/USDT paid → provision |
+| `GET` | `/api/agents/:id` | — | one agent: status, IP, specs, plan, credit balance |
+| `POST` | `/api/agents/:id/confirm-payment` | admin | mark USDC/USDT paid → credit + provision |
+| `GET` | `/api/agents/:id/statement` | admin | per-home billing statement (ledger, newest first) |
+| `POST` | `/api/agents/:id/renew` | admin | add credit (`amount_usd` or `hours`); restarts a halted home |
+| `POST` | `/api/agents/:id/schedule-destroy` | admin | `{"ttl_seconds": N}` / `{"destroy_at": epoch}` / `{"cancel": true}` |
 | `POST` | `/api/agents/:id/retry` | admin | retry a failed provisioning (record keeps the real error) |
 | `POST` | `/api/agents/:id/destroy` | admin | delete the LXC, reclaim disk |
 
@@ -199,15 +208,24 @@ The full contract lives in [`website/docs/agents.md`](website/docs/agents.md)
 and is served at `/docs/agents`; it is the source of truth for the REST
 tables above if they ever disagree.
 
-## Agent-home spec (defaults — all in `config.json`)
+## Agent-home specs — the plans (`config.json` → `plans`)
+
+Sizing, CPU share and price all come from the plan the customer picks (or
+`billing.default_plan`). Plans: RAM/disk/cores/cpuunits → `price_usd_per_hour`.
+
+| Plan | `memory_mb` | `disk_gb` | `cores` | `cpuunits` | `price_usd_per_hour` |
+|---|---|---|---|---|---|
+| `micro` | 512 | 4 | 1 | 256 | $0.05 |
+| `nano` | 1024 | 6 | 2 | 512 | $0.10 |
+| `standard` | 2048 | 8 | 0 (all host, shared) | 1024 | $0.30 |
+
+Other home knobs (all in `config.json`):
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `memory_mb` | `2048` | 2 GB RAM per agent |
-| `swap_mb` | `512` | 512 MB swap |
-| `disk_gb` | `8` | **max 8 GB rootfs** on `rootfs_storage` |
+| `swap_mb` | `512` | 512 MB swap per home |
 | `rootfs_storage` | `ssd120` | storage pool the agent disk lands on (`pvesm status` for your ids; example tuned for AGENCY's fast pool) |
-| `cores` | `0` | `0` ⇒ use *all* host cores, shared: every agent can burst on any core (no pinning); `cpuunits` (1024) keeps the scheduler fair; set `cpulimit` to cap one agent |
+| `disk_preflight` / `disk_headroom_pct` | `true` / `10` | fail fast with a readable error rather than half-create a container when the storage can't fit the home (avail + 10% headroom) |
 | `unprivileged` | `true` | unprivileged LXC (the community-scripts default) |
 | `net_bridge` | `sandbox` | the **SDN vnet** (or linux bridge) every agent NIC attaches to — `bridge=sandbox` in net0 |
 | `net_preflight` | `true` | verify the NIC target exists before provisioning; set `false` if you manage a raw bridge device PVE's API can't list |
@@ -270,12 +288,26 @@ detect the vnet and can even create it: `SDN_ZONE=<zone> ./proxmox/setup.sh`).
 
 ## Billing model
 
-- **Free slot** — your first home is on us.
-- **Paid homes** — `billing.price_usd_per_container_per_month` (default
-  $5.00) in USDC or USDT, ERC-20, quotes valid `quote_valid_hours` (72h).
-- Each quote carries a unique **`reference`** = the agent id. Ask customers
-  to put it in the transfer memo, so an on-chain scan or a payment-provider
-  webhook can match transfers to homes; confirm via
+Metered, per-second, credit-based (see `website/docs/agents.md` for the full
+contract):
+
+- **Credit up front.** Free homes buy `billing.free_credit_usd` (default
+  $2.00) of run-time credit; paid homes get the **confirmed quote amount**
+  (`plan.price_usd_per_hour × billing.deposit_hours`, default 24h) when
+  `confirm-payment` lands. `free_credit_usd: 0` = unmetered homes;
+  `billing.metered: false` switches the whole ticker off (legacy flat model).
+- **The ticker** (watchdog, `billing.tick_interval_s` default 60s) meters
+  each running home in fractional seconds at its plan's $/hr, debits credit
+  into a per-home ledger, and flags `balance_low` under
+  `low_balance_warn_usd`. At zero credit the container is stopped and the
+  home `halted`; billing stops with it. Elapsed time is capped at
+  `max_backfill_s` (1 day) so a long outage can't bill the whole gap.
+- **Operate it.** `statement` reads the ledger; `renew` adds credit
+  (`amount_usd` or `hours`) and restarts a halted home;
+  `schedule-destroy` is the TTL (`ttl_seconds`, `destroy_at`, or `cancel`).
+- Each paid quote carries a unique **`reference`** = the agent id. Ask
+  customers to put it in the transfer memo, so an on-chain scan or a
+  payment-provider webhook can match transfers to homes; confirm via
   `POST /api/agents/:id/confirm-payment`.
 
 > This repo ships the quote + confirmation loop, not a live blockchain

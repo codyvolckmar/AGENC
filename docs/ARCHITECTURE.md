@@ -4,10 +4,11 @@
 
 1. A public website that accepts **inbound requests** and spins up small
    container homes for AI agents on a private Proxmox node.
-2. Strict per-agent limits: **≤ 8 GB disk**, **2 GB RAM**, **shared access
-   to every host CPU** (no pinning), unprivileged LXC.
-3. **Free first home**; every subsequent web-provisioned home is sold for
-   **USDC/USDT** via a machine-readable quote + payment reference.
+2. **Plan-sized homes**: customers pick micro / nano / standard
+   (RAM / disk / cores → USD/hour); strict per-plan limits, unprivileged LXC.
+3. **Metered billing**: credit up front (free tier or paid quote), a
+   per-second ticker, a ledger + statement per home, low-balance warnings,
+   an automatic halt at zero credit, and TTL scheduled destroys.
 4. Zero-dependency deployment on a stock Debian/Proxmox node: Python 3
    stdlib only, one systemd service, one nginx vhost.
 
@@ -17,9 +18,13 @@
 website/                 static assets (index.html, css, js) — served by the API
 api/
   app.py                 HTTP server: static file router + /api REST router
-                         + watchdog thread that advances provisioning state
+                         + watchdog thread that advances provisioning state,
+                         meters running homes, and executes scheduled destroys
   proxmox.py             PVE JSON API client. dry_run mode simulates the node
-  provisioning.py        LXC lifecycle: build params → create → poll task → IP
+  provisioning.py        LXC lifecycle: build params (from the plan) → create
+                         → poll task → IP; scheduled destroys
+  plans.py               plan tiers: RAM / disk / cores / cpuunits → $/hr
+  billing.py             metered ticker, ledger, statements, renew
   quotes.py              stablecoin quote generation / confirm / cancel
   store.py               JSON-file store (atomic, lock-guarded)
 proxmox/setup.sh         creates role+user+API token, downloads OS template
@@ -59,6 +64,20 @@ record (status = error, error = message). The operator fixes the cause
 and calls `POST /api/agents/:id/retry` (admin) to re-run provisioning.
 ```
 
+Metering and lifecycle (same watchdog, next pass):
+
+```
+status = running & metered
+        │  billing.tick every tick_interval_s
+        │  elapsed_s x price_per_hour / 3600 -> ledger entry
+        │  credit_usd -= … billed_total_usd += …
+        ├─ balance <= 0  → px.stop_lxc(vmid); status = halted (billing stops)
+        └─ balance < warn → balance_low = true
+
+any non-destroyed home with destroy_scheduled_at <= now
+        └─ destroy_home() — the scheduled TTL executed by the watchdog
+```
+
 Destroy (`POST /api/agents/:id/destroy`, admin key) deletes the LXC and
 marks the record `destroyed`; a destroyed free home gives its slot back.
 
@@ -84,14 +103,17 @@ role includes **`SDN.Audit` + `SDN.Use`** so the API can inspect the
 
 ### The LXC payload (business rules encoded here)
 
+Sizing comes from the agent's plan (stored on the record at request time),
+not from global config:
+
 ```
 ostemplate: local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst
-memory:     2048          # 2 GB RAM per agent
+memory:     2048          # plan.memory_mb        (standard)
 swap:       512
-cores:      8             # 0 in config => all host cores, shared
-cpuunits:   1024          # fair-share scheduling between agents
-cpulimit:   (unset)       # optional per-agent cap
-rootfs:     local-lvm:8   # ≤ 8 GB disk
+disk:       8             # plan.disk_gb, preflighted against storage free space
+cores:      8             # plan.cores; 0 => all host cores, shared (detected)
+cpuunits:   1024          # plan.cpuunits — fair-share scheduling between homes
+rootfs:     local-lvm:8
 net0:       name=eth0,bridge=vmbr0,firewall=0,ip=dhcp
 unprivileged: 1           # security default (community-scripts style)
 features:   nesting=1,keyctl=1
@@ -99,6 +121,31 @@ ssh-public-keys: <user's key + optional agency key>
 tags:     agenc
 onboot:   0  start: 1
 ```
+
+`_disk_preflight()` stats the rootfs storage (`GET …/storage/<id>/status`)
+and refuses to create when `avail` can't fit `disk_gb × (1 + headroom_pct/100)`,
+failing fast instead of half-creating a container.
+
+## Metered billing (plans.py + billing.py)
+
+Every home is created from a named plan (`plans.py`): `micro`/`nano`/`standard`
+map RAM/disk/cores/cpuunits to a USD-per-hour price, and the API stores the
+resolved specs + price on the agent record. Credit is bought up front — free
+homes get `free_credit_usd`, paid homes get the confirmed quote amount — and
+the watchdog's `billing.tick()` meters each running home in fractional
+seconds (`elapsed × price / 3600`) into a capped per-home ledger
+(`LEDGER_CAP = 200`), debiting `credit_usd` into `billed_total_usd`.
+
+| Event | Consequence |
+|---|---|
+| balance ≤ `low_balance_warn_usd` | `balance_low: true` — warns, keeps running |
+| balance ≤ 0 | `px.stop_lxc()`, status `halted`, `halted_at` set — billing stops |
+| `renew` (+USD or +hours) | credit += amount; halted home restarts (`start_lxc`) and resumes metering |
+| `destroy_scheduled_at` passes | `process_schedules()` → `destroy_home()` — the TTL, executed by the watchdog |
+
+Elapsed time is capped at `max_backfill_s` so a multi-day outage bills at
+most one day. The tick itself is write-cadenced by `tick_interval_s`
+(default 60s) so the JSON store isn't churned every watchdog pass.
 
 ## State & safety
 
@@ -178,4 +225,8 @@ validation, hostname conflicts, destroy and PII-stripping are all asserted.
 The agent-native surfaces are covered too: `llms.txt`/`llms-full.txt`,
 the markdown twins, `Accept` negotiation (markdown vs HTML vs JSON, API
 never negotiates), the error envelope + `request_id`, HEAD probes and
-negotiated 404s.
+negotiated 404s. Phase-2 billing is covered end to end: plan catalog and
+selection, quote amount = plan × deposit hours, credit on confirm-payment,
+the metering ticker halting a home at zero credit, statements, renew
+(with restart), disk-space preflight failures, and scheduled destroys
+(TTL, cancel, past-date rejection, admin-only).
