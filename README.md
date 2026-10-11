@@ -284,6 +284,38 @@ point `proxmox.os_template` at any template in your template storage, or
 adapt `provisioning.build_params` to layer their scripts into the agent
 home after creation.
 
+### Stock vs custom agent image (recommended: custom, built reproducibly)
+
+| | Stock Ubuntu | Custom template (`proxmox/build-agent-template.sh`) |
+|---|---|---|
+| tooling on day one | none | python3, git, curl, jq, build tools, vim, tmux… |
+| consistency | needs per-home bootstrap | identical every time |
+| footprint | ~300 MB | 1–3 GB |
+| maintenance | always current | **rebuild regularly** (patches bake in) |
+
+Build once, deploy many:
+
+```bash
+./proxmox/build-agent-template.sh
+# prints e.g.   Template built: local:vztmpl/agenc-agent-2999-…tar.zst
+#                os_template -> "agenc-agent"   template_storage -> "local-lvm"
+```
+
+Then point the API at it (`/opt/agenc/api/config.json` + `systemctl restart agenc-api`):
+
+```json
+"proxmox": { "template_storage": "local-lvm", "os_template": "agenc-agent" }
+```
+
+`os_template` is a **prefix** — the API picks the newest tarball matching it, so
+re-running the build script (or a nightly cron) refreshes every new home
+automatically; keep `"ubuntu-24.04"` around as an instant fallback.
+
+The build script scrubs what must not be shared between clones: **SSH host
+keys, `/etc/machine-id`, logs, apt lists** — otherwise every home would share
+identities. Keep the template unprivileged with `nesting=1`; per-home features
+(root password, extra flags) belong at provision time, not in the image.
+
 ## Troubleshooting
 
 An agent stuck in `error` is almost always one of four things — all are
