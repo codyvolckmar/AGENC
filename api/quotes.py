@@ -24,12 +24,13 @@ def _pick_asset(agent_id: str, assets: list[str]) -> str:
 
 
 def create_quote(agent_id: str, billing: dict, amount_usd: float | None = None,
-                 plan: str | None = None) -> dict:
+                 plan: str | None = None, period: str | None = None,
+                 days: int | None = None) -> dict:
     """Build a quote dict for one agent home.
 
-    The amount is the plan's deposit (price/hr x deposit_hours), computed
-    by the caller; the customer sends it with memo=reference and the home
-    is credited that amount on confirmation (see billing.renew-free path).
+    The amount is the price for one prepaid billing period (plan x period
+    fraction, see plans.period_price); the customer sends it with
+    memo=reference and that period is credited on confirmation.
     """
     assets = billing.get("accepted_assets") or ["USDC", "USDT"]
     asset = _pick_asset(agent_id, assets)
@@ -43,6 +44,8 @@ def create_quote(agent_id: str, billing: dict, amount_usd: float | None = None,
         "asset": asset,
         "amount": f"{amount:.2f}",
         "plan": plan,
+        "period": period,
+        "days": days,
         "chain": chain_info.get("chain", "ethereum"),
         "network": chain_info.get("network", "ERC-20"),
         "address": addresses.get(asset, ""),
@@ -54,8 +57,8 @@ def create_quote(agent_id: str, billing: dict, amount_usd: float | None = None,
     quote["note"] = (
         f"Send exactly {quote['amount']} {quote['asset']} on "
         f"{quote['chain']} ({quote['network']}) to {quote['address']} "
-        f"with memo {quote['reference']}. This buys {float(amount):.2f} USD "
-        f"of metered run time at the {plan or ''} plan rate."
+        f"with memo {quote['reference']}. This prepays one {period or ''} "
+        f"({days or 0} days) of the {plan or ''} plan."
     )
     return quote
 

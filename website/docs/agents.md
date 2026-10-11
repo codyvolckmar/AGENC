@@ -11,15 +11,16 @@ AGENCY is a small self-hosted hosting provider: a website plus a provisioning
 API that spin up dedicated container homes for AI agents on your own
 [Proxmox VE] node.
 
-- First home **free** — no card, no signup ceremony; free homes start with a
-  small slice of run-time credit (`billing.free_credit_usd`, default $2).
+- First home **free** — no card, no signup ceremony; free homes come with
+  the first **prepaid period** on us (`billing.free_periods`).
 - Every further web-provisioned home is **quoted in USDC/USDT** (stablecoin)
-  with a unique payment reference; the confirmed amount becomes the home's
-  run-time credit.
+  with a unique payment reference; the confirmed amount prepays one billing
+  period.
 - **Plans, not fixed sizing** — pick `micro`, `nano` or `standard`
-  (RAM / disk / cores → USD per hour) when you request a home.
-- **Metered per second** while running, with a ledger, a per-home statement,
-  low-balance warnings, and an automatic halt at zero credit.
+  (RAM / disk / cores → USD per month) and a billing period.
+- **Pay up front, weekly / fortnightly / monthly.** Each home has a prepaid
+  window (`paid_until`); it warns as the window runs out and halts when it
+  lapses — nothing is metered per second.
 - Zero third-party dependencies: Python 3 standard library only.
 
 This document is the contract for driving that API from a shell or from an
@@ -89,6 +90,7 @@ Everything is under `/api`. Public read endpoints need no header.
 | `hostname` | yes | 2–42 chars, lowercase letters, digits, dashes |
 | `email` | yes | a valid-ish email (used for the quote / delivery note) |
 | `plan` | no | `micro` / `nano` / `standard` (see `GET /api/plans`); defaults to `billing.default_plan` |
+| `period` | no | `weekly` / `fortnightly` / `monthly` — the prepaid window; defaults to `billing.default_period` |
 | `purpose` | no | free text under 500 chars |
 | `ssh_key` | no | an OpenSSH public key, installed into the home |
 | `stack` | no | list of stack-group ids (see `GET /api/stacks`), ≤ max |
@@ -121,57 +123,69 @@ answers `409` (`conflict`). Requests are rate-limited per IP.
 
 Send the stablecoin with the `reference` in the memo; once the transfer is
 confirmed (operator, or a payment webhook wired to `confirm-payment`), the
-confirmed amount lands on the home as **run-time credit** and provisioning
-starts. Setting `billing.free_tier_containers` to `0` makes every home free
-(still metered — free homes buy `billing.free_credit_usd` of credit).
+home gets a prepaid window of the quoted period and provisioning starts.
+Setting `billing.free_tier_containers` to `0` makes every home free — they
+still get `free_periods` prepaid periods. Dev mode (no expiry at all): set
+`free_tier_containers: 0` **and** `free_periods: 0`.
 
-## Plans & metered billing
+## Plans & prepaid periods
 
-Every home runs on a plan. `GET /api/plans` is public and returns the
-catalog plus the shop defaults:
+`GET /api/plans` is public: the plan catalog, the periods, and the shop
+defaults. Pricing is **per month**, mainstream-competitive:
 
 ```json
-{"ok": true, "metered": true, "default_plan": "standard",
- "deposit_hours": 24, "free_credit_usd": 2.0, "low_balance_warn_usd": 0.25,
+{"ok": true, "default_plan": "standard", "default_period": "monthly",
+ "free_periods": 1, "warn_before_s": 86400,
+ "periods": {
+   "weekly":      {"days": 7,  "months": 0.25},
+   "fortnightly": {"days": 14, "months": 0.5},
+   "monthly":     {"days": 30, "months": 1.0}},
  "plans": [
-   {"id": "micro",    "memory_mb": 512,  "disk_gb": 4, "cores": 1,
-    "cpuunits": 256,  "price_usd_per_hour": 0.05, "deposit_usd": 1.2},
-   {"id": "nano",     "memory_mb": 1024, "disk_gb": 6, "cores": 2,
-    "cpuunits": 512,  "price_usd_per_hour": 0.10, "deposit_usd": 2.4},
-   {"id": "standard", "memory_mb": 2048, "disk_gb": 8, "cores": 0,
-    "cpuunits": 1024, "price_usd_per_hour": 0.30, "deposit_usd": 7.2}
+   {"id": "micro", "memory_mb": 1024, "disk_gb": 30, "cores": 1,
+    "cpuunits": 256,  "price_usd_per_month": 8.0,
+    "price_usd_per_hour_equiv": 0.011,
+    "period_prices": {"weekly": 2.0, "fortnightly": 4.0, "monthly": 8.0}},
+   {"id": "nano", "memory_mb": 4096, "disk_gb": 50, "cores": 4,
+    "cpuunits": 1024, "price_usd_per_month": 16.0,
+    "period_prices": {"weekly": 4.0, "fortnightly": 8.0, "monthly": 16.0}},
+   {"id": "standard", "memory_mb": 8192, "disk_gb": 64, "cores": 8,
+    "cpuunits": 2048, "price_usd_per_month": 32.0,
+    "price_usd_per_hour_equiv": 0.044,
+    "period_prices": {"weekly": 8.0, "fortnightly": 16.0, "monthly": 32.0}}
  ]}
 ```
 
-`cores: 0` means the plan shares the whole host CPU pool (like the original
-home spec); fixed-core plans get a pinned slice. While a home is `running`
-the watchdog meters it **per second** at `price_usd_per_hour`:
+A **period price** is the monthly rate × the period's fraction (0.25 / 0.5 /
+1.0), rounded to cents. `price_usd_per_hour_equiv` is informational only
+(monthly ÷ 730 h) — **nothing is billed per hour**.
 
-- **credit** (`credit_usd`) is bought up front — free homes get
-  `free_credit_usd`, paid homes get the confirmed quote amount.
-- each tick appends to the home's **ledger** and moves money from
-  `credit_usd` to `billed_total_usd`; `balance_usd = credit - billed`.
-- balance below `low_balance_warn_usd` sets `balance_low: true` — the home
-  warns but keeps running.
-- balance at $0 → the container is **stopped and `halted`**. Billing stops;
-  renew or destroy to act. A halted home keeps its hostname until destroyed.
+While a home exists it carries a prepaid window:
 
-Elapsed time is metered in fractional seconds from the last tick and capped
-at `billing.max_backfill_s` (1 day) so an outage of many days doesn't bill
-for time nobody could intervene.
+- **free-tier homes** get `billing.free_periods` (default 1) periods free;
+- **paid homes** get one period of their plan when the quote is confirmed;
+- `paid_until` is the wall-clock deadline; `remaining_s` is how much is
+  left; `billing_period`/`period_days`/`period_price_usd` describe the
+  window the home was bought on.
+
+Within `warn_before_s` (1 day) of the deadline the home is flagged
+`expiring: true` — it warns but keeps running. When the deadline passes,
+the watchdog **stops the container and `halt`s the home**; billing stops
+with it. Renew or destroy to act. A halted home keeps its hostname until
+destroyed.
 
 ### Statement, renew, TTL
 
 - `GET /api/agents/<id>/statement` (admin) returns the ledger newest-first
-  plus the summary: plan, price/hr, credit, billed, balance, and the tick
-  cadence. Use it for disputes and for closing an account.
-- `POST /api/agents/<id>/renew` (admin) adds credit — `{"amount_usd": 5}` or
-  `{"hours": 12}` (hours × price/hr). A `halted` home restarts and resumes
-  metering.
+  plus the summary: plan, $/mo, period, `paid_until`, `remaining_s`,
+  periods bought and total billed. Use it for disputes and closing accounts.
+- `POST /api/agents/<id>/renew` (admin) extends the prepaid window —
+  `{"period": "weekly", "periods": 2}` buys two weeks (billed at the plan's
+  weekly rate), `{"days": 10}` buys ten days pro-rated at the monthly rate.
+  A `halted` home restarts and resumes the clock.
 - `POST /api/agents/<id>/schedule-destroy` (admin) is the TTL:
   `{"ttl_seconds": 3600}` destroys in an hour, `{"destroy_at": <epoch>}` at a
   wall-clock time, `{"cancel": true}` cancels. The watchdog executes it and
-  billing stops the moment the container is gone.
+  billing ends the moment the container is gone.
 
 ## Lifecycle
 
@@ -179,8 +193,8 @@ for time nobody could intervene.
 |---|---|
 | `quote_required` | paid path: waiting for payment |
 | `provisioning` | LXC create task running; the watchdog polls it |
-| `running` | container is up and metering; `ip` is set when detected |
-| `halted` | credit hit $0 — container stopped, billing stopped |
+| `running` | container is up; `ip` is set when detected |
+| `halted` | prepaid period lapsed — container stopped, billing stopped |
 | `error` | something failed; the REAL reason is on the record, fix and `retry` |
 | `destroyed` | deleted via `destroy` or a scheduled TTL (frees the free slot) |
 

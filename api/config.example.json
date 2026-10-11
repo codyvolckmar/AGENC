@@ -48,20 +48,22 @@
   },
 
   "plans": {
-    "micro":    { "memory_mb": 512,  "disk_gb": 4,  "cores": 1, "cpuunits": 256,  "price_usd_per_hour": 0.05 },
-    "nano":     { "memory_mb": 1024, "disk_gb": 6,  "cores": 2, "cpuunits": 512,  "price_usd_per_hour": 0.10 },
-    "standard": { "memory_mb": 2048, "disk_gb": 8,  "cores": 0, "cpuunits": 1024, "price_usd_per_hour": 0.30 }
+    "micro":    { "memory_mb": 1024, "disk_gb": 30, "cores": 1, "cpuunits": 256,  "price_usd_per_month": 8.0  },
+    "nano":     { "memory_mb": 4096, "disk_gb": 50, "cores": 4, "cpuunits": 1024, "price_usd_per_month": 16.0 },
+    "standard": { "memory_mb": 8192, "disk_gb": 64, "cores": 8, "cpuunits": 2048, "price_usd_per_month": 32.0 }
   },
 
   "billing": {
     "free_tier_containers": 1,
-    "metered": true,
-    "free_credit_usd": 2.0,
-    "low_balance_warn_usd": 0.25,
-    "deposit_hours": 24,
-    "tick_interval_s": 60,
-    "max_backfill_s": 86400,
+    "free_periods": 1,
+    "default_period": "monthly",
     "default_plan": "standard",
+    "warn_before_s": 86400,
+    "periods": {
+      "weekly":      { "days": 7,  "months": 0.25 },
+      "fortnightly": { "days": 14, "months": 0.5 },
+      "monthly":     { "days": 30, "months": 1.0 }
+    },
     "accepted_assets": ["USDC", "USDT"],
     "chains": {
       "USDC": { "chain": "ethereum", "network": "ERC-20" },

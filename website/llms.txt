@@ -26,8 +26,9 @@
 
 - [Health](/api/health): node CPU/memory, storage free, live + metered agent
   counts, plans, free-tier usage, Proxmox reachability. No auth.
-- [Plans](/api/plans): the plan tiers — RAM / disk / cores → USD per hour,
-  default plan, deposit size. No auth.
+- [Plans](/api/plans): the plan tiers — RAM / disk / cores → USD per month —
+  plus the billing periods (weekly / fortnightly / monthly) and period
+  prices. No auth.
 - [Stacks](/api/stacks): the curate-your-stack catalog — baked groups,
   selectable add-ons, venv option, max. No auth.
 - [Agents](/api/agents): request a home (POST, needs `X-Agency-Secret`;
@@ -40,11 +41,11 @@
 
 ## Billing
 
-Homes are metered per second at their plan's USD-per-hour rate, debited from
-up-front credit (free homes buy `free_credit_usd`; paid homes get the
-confirmed quote amount). Balance below the warn floor sets `balance_low`;
-at $0 the container is stopped and the home `halted` until renewed or
-destroyed.
+Homes are **paid up front per billing period** — weekly, fortnightly or
+monthly — at the plan's monthly rate. Each home carries a prepaid window
+(`paid_until`); with `warn_before_s` left it is flagged `expiring`, and at
+the deadline the container is stopped and the home `halted` until renewed
+or destroyed. Free homes get the first period(s) free (`free_periods`).
 
 ## Conventions
 

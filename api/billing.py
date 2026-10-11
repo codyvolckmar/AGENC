@@ -1,23 +1,12 @@
-"""Metered billing: a per-second ticker over running homes, a ledger, and
-statements.
+"""Prepaid period billing: pay up front weekly / fortnightly / monthly.
 
-Every home is created from a plan (see plans.py) at a `price_usd_per_hour`
-recorded on the agent. Credit is bought up front:
+Customers buy billing periods at the plan's monthly rate (plans.py). Each
+home carries `paid_until` — when the prepaid window lapses, the watchdog
+flags `expiring` (near the end) and then stops the container and `halt`s
+the home. `renew()` extends the window and restarts a halted home.
 
-  * free-tier homes get `billing.free_credit_usd` (0 => unmetered),
-  * paid homes get the confirmed quote amount when payment lands
-    (confirm-payment / a future webhook).
-
-The watchdog ticks each metered, running home: elapsed seconds x price / 3600
-are debited from credit into a per-agent ledger. Beneath
-`billing.low_balance_warn_usd` the home is flagged `balance_low`; at zero
-credit the container is stopped and the home `halted`. `renew()` re-adds
-credit and, for a halted home, restarts the container.
-
-Precision is per-second (fractional seconds are charged); the write cadence
-is `billing.tick_interval_s` so the JSON store isn't churned every poll.
-Elapsed time is capped at `billing.max_backfill_s` so a multi-day outage
-does not bill for wall-clock time the operator could not have intervened on.
+Nothing is metered per second; a ledger keeps the purchase history for the
+per-home statement (and, later, for the Phase-1 account balance).
 """
 
 from __future__ import annotations
@@ -25,7 +14,7 @@ from __future__ import annotations
 import logging
 import time
 
-from proxmox import Proxmox, ProxmoxError  # noqa: F401  (type annotations)
+from proxmox import ProxmoxError  # noqa: F401  (type annotations)
 
 log = logging.getLogger("agenc.billing")
 
@@ -33,87 +22,68 @@ LEDGER_CAP = 200  # keep the newest N ledger entries on the record
 
 
 # ------------------------------------------------------------- queries
-def credit(agent: dict) -> float:
-    return float(agent.get("credit_usd") or 0.0)
-
-
 def billed(agent: dict) -> float:
     return float(agent.get("billed_total_usd") or 0.0)
 
 
-def balance_usd(agent: dict) -> float:
-    return round(credit(agent) - billed(agent), 4)
+def paid_until(agent: dict) -> float:
+    return float(agent.get("paid_until") or 0.0)
 
 
-def metered(agent: dict) -> bool:
-    """Is this home charged for running time? (Stored flag; credit may be 0.)"""
-    return bool(agent.get("metered"))
+def remaining_s(agent: dict) -> int | None:
+    """Seconds until the prepaid window lapses (negative => expired)."""
+    until = paid_until(agent)
+    if not until:
+        return None  # dev mode: no expiry
+    return int(until - time.time())
 
 
-def warn_floor(cfg: dict) -> float:
-    return float(cfg.get("billing", {}).get("low_balance_warn_usd", 0.25))
+def warn_before_s(cfg: dict) -> float:
+    return float(cfg.get("billing", {}).get("warn_before_s", 86400))
 
 
-def tick_interval(cfg: dict) -> float:
-    return float(cfg.get("billing", {}).get("tick_interval_s", 60))
+# ----------------------------------------------------------- credits
+def credit_periods(agent: dict, count: int, days: int, price: float = 0.0,
+                   label: str = "period") -> dict:
+    """Add `count` prepaid periods to `agent` in place (creation helper).
 
-
-def max_backfill(cfg: dict) -> float:
-    return float(cfg.get("billing", {}).get("max_backfill_s", 86400))
+    Used for free-tier sign-up periods (price 0) and the paid quote on
+    confirmation. Mutates and returns the agent dict.
+    """
+    now = time.time()
+    base = max(float(agent.get("paid_until") or 0.0), now)
+    agent["paid_until"] = base + count * int(days) * 86400
+    agent["periods_bought"] = int(agent.get("periods_bought") or 0) + count
+    agent["billed_total_usd"] = round(billed(agent) + float(price) * count, 2)
+    ledger = list(agent.get("ledger") or [])
+    ledger.append({"at": int(now), "days": int(days) * count,
+                   "amount_usd": round(float(price) * count, 2), "note": label})
+    if len(ledger) > LEDGER_CAP:
+        ledger = ledger[-LEDGER_CAP:]
+    agent["ledger"] = ledger
+    agent["expiring"] = False
+    return agent
 
 
 # -------------------------------------------------------------- ticking
-def tick(store, cfg: dict, px: Proxmox, agent: dict) -> None:
-    """One metering pass for `agent`. No-op unless running + metered + due.
+def tick(store, cfg: dict, px, agent: dict) -> None:
+    """One expiry pass for `agent`. No-op unless running with a paid_until.
 
-    Charges fractional seconds since `last_tick_at` at the plan's hourly
-    price, appends a ledger entry, and halts the home at zero credit.
-    Self-initializes `meter_started_at`/`last_tick_at` on the first pass.
+    Sets `expiring` as the prepaid window runs out; at the boundary (or
+    past it) the container is stopped and the home `halted`. Billing stops
+    with the halt — buy more time to resume.
     """
-    if agent.get("status") != "running" or not metered(agent):
+    if agent.get("status") != "running":
         return
-    price = float(agent.get("price_per_hour") or 0.0)
-    if price <= 0:
-        return
+    until = paid_until(agent)
+    if not until:
+        return  # dev mode home: no expiry
     now = time.time()
-    last = float(agent.get("last_tick_at") or 0.0)
-    if not last:
-        store.update(agent["id"], meter_started_at=now, last_tick_at=now)
-        return
-    if now - last < tick_interval(cfg):
-        return  # keep the write cadence; seconds still count from last_tick
-
-    elapsed = min(now - last, max_backfill(cfg))
-    if elapsed < 1:
-        store.update(agent["id"], last_tick_at=now)
-        return
-    amount = round(price * elapsed / 3600.0, 6)
-    if amount <= 0:
-        store.update(agent["id"], last_tick_at=now)
-        return
-
-    new_billed = round(billed(agent) + amount, 6)
-    balance = round(credit(agent) - new_billed, 6)
-    entry = {"at": int(now), "seconds": round(elapsed, 1), "amount_usd": amount}
-    ledger = list(agent.get("ledger") or [])
-    ledger.append(entry)
-    if len(ledger) > LEDGER_CAP:
-        ledger = ledger[-LEDGER_CAP:]
-
-    update = {
-        "billed_total_usd": new_billed,
-        "credit_usd": credit(agent),
-        "ledger": ledger,
-        "last_tick_at": now,
-        "balance_low": 0 < balance <= warn_floor(cfg),
-    }
-    if balance <= 0:
-        # clip the overrun: billed never exceeds credit
-        update["billed_total_usd"] = credit(agent)
-        update["credit_usd"] = credit(agent)
-        update["balance_low"] = False
-        update["status"] = "halted"
-        update["halted_at"] = int(now)
+    left = until - now
+    if left <= 0:
+        store.update(
+            agent["id"], status="halted", halted_at=int(now), expiring=False,
+            last_tick_at=now)
         vmid = agent.get("vmid")
         if vmid:
             try:
@@ -121,49 +91,68 @@ def tick(store, cfg: dict, px: Proxmox, agent: dict) -> None:
             except ProxmoxError as exc:
                 log.warning("halt %s (vmid %s): could not stop container: %s",
                             agent["id"], vmid, exc)
-        log.warning("agent %s halted — credit exhausted (billed $%.2f @ $%.2f/hr)",
-                    agent["id"], update["billed_total_usd"], price)
-    store.update(agent["id"], **update)
+        log.warning("agent %s halted — prepaid period lapsed "
+                    "(%d days at $%.2f/mo; renew to resume)",
+                    agent["id"], int(agent.get("period_days") or 30),
+                    float(agent.get("price_usd_per_month") or 0))
+        return
+    expiring = left <= warn_before_s(cfg)
+    if bool(agent.get("expiring")) != expiring:
+        store.update(agent["id"], expiring=expiring)
 
 
 # ---------------------------------------------------------- statements
 def statement(cfg: dict, agent: dict) -> dict:
-    """A per-home billing statement: summary + newest-first ledger."""
+    """A per-home statement: period window + newest-first purchase ledger."""
     return {
         "agent_id": agent["id"],
         "hostname": agent.get("hostname"),
         "status": agent.get("status"),
         "plan": agent.get("plan"),
-        "price_usd_per_hour": agent.get("price_per_hour"),
-        "metered": metered(agent),
-        "credit_usd": credit(agent),
+        "price_usd_per_month": agent.get("price_usd_per_month"),
+        "billing_period": agent.get("billing_period"),
+        "period_days": agent.get("period_days"),
+        "period_price_usd": agent.get("period_price_usd"),
+        "paid_until": paid_until(agent) or None,
+        "remaining_s": remaining_s(agent),
+        "expiring": bool(agent.get("expiring")),
+        "periods_bought": agent.get("periods_bought", 0),
         "billed_total_usd": billed(agent),
-        "balance_usd": balance_usd(agent),
-        "balance_low": bool(agent.get("balance_low")),
-        "meter_started_at": agent.get("meter_started_at"),
-        "last_tick_at": agent.get("last_tick_at"),
-        "halted_at": agent.get("halted_at"),
-        "tick_interval_s": tick_interval(cfg),
-        "warn_floor_usd": warn_floor(cfg),
+        "warn_before_s": warn_before_s(cfg),
         "entries": list(reversed((agent.get("ledger") or [])[-LEDGER_CAP:])),
     }
 
 
 # --------------------------------------------------------------- renew
-def renew(store, cfg: dict, px: Proxmox, agent: dict, amount_usd: float) -> dict:
-    """Add credit; restart a halted home. Returns the updated agent record."""
-    amount = round(float(amount_usd), 4)
-    new_credit = round(credit(agent) + amount, 4)
-    entry = {"at": int(time.time()), "renew_usd": amount}
+def renew(store, cfg: dict, px, agent: dict, days: int,
+          amount_usd: float = 0.0, label: str = "renew", count: int = 1) -> dict:
+    """Extend the prepaid window; restart a halted home. Returns the record.
+
+    `days`/`amount_usd` are recorded for the ledger, `label` describes what
+    was bought (e.g. "weekly x2", "14 days"), and `count` is how many
+    billing-period records this purchase represents.
+    """
+    days = max(1, min(int(days), 366))
+    now = time.time()
+    base = max(paid_until(agent), now) if agent.get("status") != "halted" else now
+    new_until = base + days * 86400
+    entry = {"at": int(now), "days": days, "amount_usd": round(float(amount_usd), 2),
+             "note": label}
     ledger = list(agent.get("ledger") or [])
     ledger.append(entry)
     if len(ledger) > LEDGER_CAP:
         ledger = ledger[-LEDGER_CAP:]
-    update = {"credit_usd": new_credit, "ledger": ledger, "balance_low": False}
+    update = {
+        "paid_until": new_until,
+        "periods_bought": int(agent.get("periods_bought") or 0) + count,
+        "billed_total_usd": round(billed(agent) + float(amount_usd), 2),
+        "ledger": ledger,
+        "expiring": False,
+        "last_tick_at": now,
+    }
     if agent.get("status") == "halted":
         update["status"] = "running"
         update["halted_at"] = None
-        update["last_tick_at"] = time.time()
         vmid = agent.get("vmid")
         if vmid:
             try:
@@ -173,6 +162,7 @@ def renew(store, cfg: dict, px: Proxmox, agent: dict, amount_usd: float) -> dict
                 update["error"] = f"renew: could not restart container: {exc}"
                 log.warning("renew %s: restart failed: %s", agent["id"], exc)
     store.update(agent["id"], **update)
-    log.info("agent %s renewed +$%.2f (credit $%.2f, status %s)",
-             agent["id"], amount, new_credit, store.get(agent["id"]).get("status"))
+    log.info("agent %s renewed +%d days (until %s, status %s)",
+             agent["id"], days, time.strftime("%Y-%m-%d", time.localtime(new_until)),
+             store.get(agent["id"]).get("status"))
     return store.get(agent["id"])

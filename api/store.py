@@ -85,8 +85,8 @@ class Store:
         )
 
     def metered_count(self) -> int:
-        """Homes charged for run time (billing health/dashboards)."""
+        """Homes on a prepaid window (billing health/dashboards)."""
         return sum(
             1 for a in self.all()
-            if a.get("metered") and a.get("status") in {"running", "halted"}
+            if a.get("paid_until") and a.get("status") in {"running", "halted"}
         )
