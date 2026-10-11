@@ -322,6 +322,15 @@ Build once, deploy many:
 #                os_template -> "agenc-agent"   template_storage -> "local-lvm"
 ```
 
+First run needs a storage carrying **both** `rootdir` and `vztmpl` (the
+build container lives there and the resulting tarball lands there). The
+script auto-picks one and errors with a fix if missing — typical one-shot:
+
+```bash
+pvesh set /cluster/storage/local --content vztmpl,iso,backup,snippets,rootdir
+# (or GUI: Datacenter -> Storage -> local -> Edit -> Content: tick 'Container')
+```
+
 Then point the API at it (`/opt/agenc/api/config.json` + `systemctl restart agenc-api`):
 
 ```json

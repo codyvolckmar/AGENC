@@ -44,25 +44,35 @@ vmid_free() {
 
 pick_build_storage() {
   if [ -n "${BUILD_STORAGE:-}" ]; then echo "$BUILD_STORAGE"; return 0; fi
-  python3 - <<'PY'
+  # pvesh, not pvesm: pvesm status ALWAYS prints a fixed table and ignores
+  # --output-format json (see pve-storage CLI: status => … $print_status).
+  python3 - "$NODE" <<'PY'
 import json, subprocess, sys
-out = subprocess.run(
-    ["pvesm", "status", "--output-format", "json"], capture_output=True, text=True,
-).stdout
+node = sys.argv[1]
+res = subprocess.run(
+    ["pvesh", "get", f"/nodes/{node}/storage", "--output-format", "json"],
+    capture_output=True, text=True,
+)
+out = res.stdout.strip()
+if res.returncode != 0 or not out:
+    sys.stderr.write("could not list storages: " + (res.stderr or out)[:300] + "\n")
+    sys.exit(2)
 try:
     storages = json.loads(out)
 except json.JSONDecodeError:
-    sys.stderr.write("could not parse pvesm status\n"); sys.exit(1)
+    sys.stderr.write("unexpected pvesh output: " + out[:300] + "\n")
+    sys.exit(2)
 
 def ok(s, want):
-    return (s.get("status") == "active"
-            and s.get("storage")
-            and want <= set((s.get("content") or "").split(",")))
+    return s.get("storage") and want <= set((s.get("content") or "").split(","))
 
 for combo in ({"rootdir", "vztmpl"}, {"rootdir"}):
     for s in storages:
         if ok(s, combo):
             print(s["storage"]); sys.exit(0)
+sys.stderr.write("rootdir-capable: " + ", ".join(
+    f'{s["storage"]}({s.get("content") or ""})' for s in storages if ok(s, {"rootdir"})
+) + "\n")
 sys.exit(1)
 PY
 }
@@ -103,12 +113,46 @@ for c in pct pveam pvesh pvesm; do
   command -v "$c" >/dev/null || { echo "!! missing $c" >&2; exit 1; }
 done
 
-BUILD_STORAGE="$(pick_build_storage)" || {
-  echo "!! no storage with 'rootdir' content (needed for the build container)" >&2
-  echo "   add/fix a storage in Datacenter -> Storage, or set BUILD_STORAGE=…" >&2
+BUILD_STORAGE="$(pick_build_storage 2>/tmp/agenc-bs.err)" || {
+  rc=$?
+  cat /tmp/agenc-bs.err >&2
+  rm -f /tmp/agenc-bs.err
+  if [ "$rc" = "2" ]; then
+    echo "!! could not read the storage list (see above)." >&2
+  else
+    echo "!! no storage with 'rootdir' content (needed for the build container)." >&2
+    echo "   Easiest fix: Datacenter -> Storage -> local -> Edit -> Content:" >&2
+    echo "   tick 'Container' (adds rootdir to a dir storage that already" >&2
+    echo "   holds vztmpl), or run: pvesh set /cluster/storage/local" >&2
+    echo "   --content vztmpl,iso,backup,snippets,rootdir" >&2
+    echo "   (or set BUILD_STORAGE=… explicitly)" >&2
+  fi
   exit 1
 }
-echo "    build storage : $BUILD_STORAGE"
+rm -f /tmp/agenc-bs.err
+HAS_VZTPL="$(python3 - "$NODE" "$BUILD_STORAGE" <<'PY'
+import json, subprocess, sys
+node, want = sys.argv[1], sys.argv[2]
+out = subprocess.run(
+    ["pvesh", "get", f"/nodes/{node}/storage", "--output-format", "json"],
+    capture_output=True, text=True,
+).stdout
+try:
+    storages = json.loads(out)
+except json.JSONDecodeError:
+    storages = []
+for s in storages:
+    if s.get("storage") == want and "vztmpl" in (s.get("content") or "").split(","):
+        print("yes"); sys.exit(0)
+print("no")
+PY
+)"
+echo "    build storage : $BUILD_STORAGE (holds vztmpl: $HAS_VZTPL)"
+if [ "$HAS_VZTPL" != "yes" ]; then
+  echo "    note: pct template will need a vztmpl-capable storage for the tarball."
+  echo "    If step 8 fails, either build on a dir storage (e.g. 'local' with the"
+  echo "    Container content type enabled) or move the tarball manually."
+fi
 
 vmid_free || { echo "!! vmid $VMID is in use — set VMID=…" >&2; exit 1; }
 
