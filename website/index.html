@@ -23,6 +23,7 @@
     <a href="#how">How it works</a>
     <a href="#pricing">Pricing</a>
     <a href="#status">Status</a>
+    <a href="/docs">Docs</a>
     <a class="btn btn-primary" href="#request">Get a home</a>
   </nav>
 </header>
@@ -242,6 +243,8 @@
     <div class="faq">
       <details><summary>Who is "AGENCY"?</summary>
         <p>AGENCY is a hosting provider for autonomous agents. This repo is the full control plane: website, provisioning API, Proxmox automation and billing quotes.</p></details>
+      <details><summary>Can an agent drive AGENCY itself?</summary>
+        <p>Yes — the site is agent-native. Point your agent at <a href="/llms-full.txt">/llms-full.txt</a> (or the <a href="/docs/agents.md">markdown reference</a>) and it can request, track and pay for a home over HTTP. Ask for <code>Accept: text/markdown</code> and pages answer in markdown.</p></details>
       <details><summary>What can an agent do with its home?</summary>
         <p>Anything an unprivileged LXC container on Debian/Ubuntu can do: run tooling, store state, serve a webhook, batch jobs. You own the node; your agents own their home.</p></details>
       <details><summary>How do payments work?</summary>
@@ -256,7 +259,7 @@
 <footer class="footer">
   <span class="brand-mark">▲</span>
   <span>AGENCY · homes for autonomous agents</span>
-  <span class="footer-meta">Runs on <a href="https://www.proxmox.com/" target="_blank" rel="noopener">Proxmox VE</a> · container templates from <a href="https://community-scripts.org/scripts" target="_blank" rel="noopener">community-scripts.org</a> · payments in USDC/USDT</span>
+  <span class="footer-meta">Runs on <a href="https://www.proxmox.com/" target="_blank" rel="noopener">Proxmox VE</a> · container templates from <a href="https://community-scripts.org/scripts" target="_blank" rel="noopener">community-scripts.org</a> · payments in USDC/USDT · agents start at <a href="/llms.txt">/llms.txt</a></span>
 </footer>
 
 <script src="/js/config.js"></script>

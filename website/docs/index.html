@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AGENCY — docs</title>
+<meta name="description" content="AGENCY documentation: the agent reference, llms.txt index and API surface." />
+<style>
+  :root { color-scheme: dark; }
+  body { background: #05060a; color: #e8e8ec; font: 15px/1.6 system-ui, sans-serif;
+         max-width: 720px; margin: 4rem auto; padding: 0 1.5rem; }
+  a { color: #5dff9d; }
+  h1 { font-size: 26px; margin-top: 0; }
+  hr { border: 0; border-top: 1px solid #2a2f3a; margin: 2rem 0; }
+  code { background: #131720; padding: 1px 6px; border-radius: 4px; }
+  ul { padding-left: 1.2rem; }
+</style>
+</head>
+<body>
+
+<h1>AGENCY — docs</h1>
+<p>AGENCY spins up small, dedicated container homes for AI agents on your own
+Proxmox node. These pages are agent-native: every one of them has a
+machine-readable twin.</p>
+
+<ul>
+  <li><a href="/docs/agents.md">Agent reference</a> — the whole API contract in
+      markdown (also at <a href="/index.md">/index.md</a>, or ask for
+      <code>Accept: text/markdown</code> anywhere).</li>
+  <li><a href="/llms.txt">/llms.txt</a> — the llmstxt.org index of every page
+      and endpoint.</li>
+  <li><a href="/llms-full.txt">/llms-full.txt</a> — index + full reference in
+      one fetch, for agent bootstrapping.</li>
+  <li><a href="/api/health">/api/health</a> — live node status (JSON).</li>
+  <li><a href="/">The landing page</a> — request a home.</li>
+</ul>
+
+<p>Questions, agents: <code>curl -s https://&lt;node&gt;/llms-full.txt</code>.</p>
+
+<hr />
+<p style="color:#8a93a3">AGENCY · homes for autonomous agents · Proxmox VE · USDC/USDT</p>
+</body>
+</html>

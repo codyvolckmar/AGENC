@@ -11,6 +11,9 @@ container homes for AI agents on your own [Proxmox VE] node.
   disk** to start (all configurable).
 - Runs with **zero third-party dependencies** — Python 3 standard library
   only. No npm, no pip, no database.
+- **Agent-native by default** — `/llms.txt` + `/llms-full.txt` (llmstxt.org),
+  a markdown twin for every page (`/index.md`, `Accept: text/markdown`), and a
+  stable error envelope (`code` / `hint` / `request_id`) on every response.
 
 ```
      browser / client                     Proxmox node (this repo)
@@ -161,6 +164,40 @@ curl -X POST http://NODE/api/agents \
   "status": "provisioning", "vmid": 1000,
   "cores": 8, "memory_mb": 2048, "disk_gb": 8, "free_tier": true }}
 ```
+
+## Agent-native surfaces
+
+Every page has a machine-readable twin, and the whole contract is one fetch.
+
+| Surface | Path | For |
+|---|---|---|
+| Agent index (llmstxt.org) | `/llms.txt` | every page + endpoint, one line each |
+| Full reference | `/llms-full.txt` | index + reference concatenated — bootstrap an agent in one fetch |
+| Markdown twin | `/index.md`, `/docs/agents.md`, `/docs/agents` | the API contract as raw markdown |
+| Content negotiation | `Accept: text/markdown` | `/` and `/docs` answer agents in markdown; browsers still get HTML |
+| HEAD | anywhere | headers-only probe (`curl -I`), body suppressed |
+| Request tracing | `X-Request-Id` | header on every response; errors echo it in `error.request_id` |
+
+Errors answer with a stable envelope so a script can branch on the machine
+code:
+
+```json
+{"ok": false, "error": {
+  "code": "rate_limit", "kind": "rate_limit",
+  "message": "too many requests from this IP",
+  "hint": "Slow down and retry later.",
+  "request_id": "3f2ab91c04d7"}}
+```
+
+Codes: `bad_request` (400) · `validation` (422) · `auth` (401) ·
+`forbidden` (403) · `rate_limit` (429) · `conflict` (409) · `not_found` (404) ·
+`proxmox` (502) · `internal` (500). `kind` mirrors `code` for backward
+compatibility. Wrong URLs answer too — in the format you asked for
+(JSON, markdown or HTML).
+
+The full contract lives in [`website/docs/agents.md`](website/docs/agents.md)
+and is served at `/docs/agents`; it is the source of truth for the REST
+tables above if they ever disagree.
 
 ## Agent-home spec (defaults — all in `config.json`)
 

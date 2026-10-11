@@ -124,6 +124,37 @@ onboot:   0  start: 1
   `proxmox.auth_ok` and `templates_available`; `deploy/deploy.sh` prints
   them on deploy and warns about `REPLACE_*`/zeroed payment placeholders.
 
+## Agent-native surfaces
+
+Implementation notes for the agent-facing contract (user-facing side is in
+the README, “Agent-native surfaces”):
+
+- **Negotiation** — `AgencyHandler._negotiated_kind()` scores explicit `Accept`
+  q-values among `text/html` / `text/markdown` / `application/json`; with no
+  stated preference (no header, or `*/*` alone) it falls back to the
+  `User-Agent` — `Mozilla` → HTML, anything else → markdown. Ties resolve to
+  HTML, browsers-style. The JSON API never negotiates.
+- **Markdown twins** — `website/docs/agents.md` is the canonical agent
+  reference: served raw at `/docs/agents.md` and `/index.md`, answers `/` and
+  `/docs` to markdown-preferring clients, and is the reference half of
+  `/llms-full.txt`. One copy of the docs — no drift.
+- **`/llms-full.txt`** is assembled per request from `website/llms.txt`
+  (index) + `website/docs/agents.md`, so the single-fetch contract cannot
+  get stale.
+- **Stable errors** — every response sets the `X-Request-Id` header;
+  `error_json()` emits `{code, kind (legacy), message, hint, request_id}`
+  with hints from `ERROR_HINTS`. Missing static paths go through
+  `_send_error_page()`, which negotiates HTML / markdown / JSON and embeds
+  the request id in the markdown body.
+- **HEAD** — `do_HEAD` routes like GET with `self._head` set, which suppresses
+  every body write (JSON, files, error pages) while keeping `Content-Length`
+  and `Content-Type`, so `curl -I` probes work for agents and health checks.
+  The API treats HEAD as GET for read endpoints.
+- **Request id lifecycle** — set in `AgencyHandler.__init__` *before*
+  `super().__init__()` because CPython ≥ 3.14 invokes `handle()` from inside
+  `BaseRequestHandler.__init__` — a request can be answered while the
+  constructor is still on the stack.
+
 ## Deployment
 
 `deploy/deploy.sh` (done as root on the node):
@@ -144,3 +175,7 @@ onboot:   0  start: 1
 the whole user journey: free home auto-provisions → running with IP; paid
 home gets a USDC/USDT quote → `confirm-payment` provisions it; auth,
 validation, hostname conflicts, destroy and PII-stripping are all asserted.
+The agent-native surfaces are covered too: `llms.txt`/`llms-full.txt`,
+the markdown twins, `Accept` negotiation (markdown vs HTML vs JSON, API
+never negotiates), the error envelope + `request_id`, HEAD probes and
+negotiated 404s.
