@@ -135,7 +135,8 @@ admin calls need `X-Admin-Key: <admin_key>`.
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | `GET` | `/api/health` | — | node CPU/mem, live agent counts, free-tier usage |
-| `POST` | `/api/agents` | site secret | request an agent home (free → auto-provision, later → quote) |
+| `GET` | `/api/stacks` | — | curate-your-stack catalog: baked groups, selectable add-ons, venv option, max |
+| `POST` | `/api/agents` | site secret | request an agent home (free → auto-provision, later → quote); body may include `"stack": [group ids]` |
 | `GET` | `/api/agents` | — | all agent summaries (no PII, no SSH keys) |
 | `GET` | `/api/agents/:id` | — | one agent: status, IP, quote |
 | `POST` | `/api/agents/:id/confirm-payment` | admin | mark USDC/USDT paid → provision |
@@ -150,7 +151,8 @@ curl -X POST http://NODE/api/agents \
   -H "X-Agency-Secret: $SITE_SECRET" \
   -d '{"hostname":"phoenix-42","email":"dev@example.com",
        "purpose":"indexes my notes",
-       "ssh_key":"ssh-ed25519 AAAAC3… dev@example.com"}'
+       "ssh_key":"ssh-ed25519 AAAAC3… dev@example.com",
+       "stack":["databases","agent-python"]}'
 ```
 
 ```json
@@ -177,6 +179,25 @@ curl -X POST http://NODE/api/agents \
 
 Every home gets `tags: agenc` and a `description` with the agent id so you
 can see them in the Proxmox UI.
+
+### Curated app stacks (from [agent-box](https://github.com/codyvolckmar/agent-box))
+
+Customers curate their own app stack in the request form — a checkbox menu
+fed by `GET /api/stacks`, driven by `api/stacks.json` (mirrors
+`agent-box.sh`'s package groups):
+
+- **Baked** (always in the image): base, python, search, inspect, git, data,
+  net, dev, docs — installed by `proxmox/build-agent-template.sh`.
+- **Selectable** (per home, up to `request.max_stack_groups` = 6): media,
+  x11, secrets, containers (podman), databases, net-scan, docs-full,
+  monitor, shell-history, headless, desktop-build, plus the `agent-python`
+  venv option (wheel-only packages into `~/.agentbox-venv`).
+
+After the container boots, the API launches the selected groups detached
+(`pct exec`, apt lists resolved from the manifest) and the watchdog waits on
+a completion marker (`container.stack_timeout_s`, default 900s) before the
+home goes `running`. Failures land in `/var/log/agenc-stack.log` inside the
+container and the agent shows `stack_status: failed`.
 
 ### Access & the root account
 

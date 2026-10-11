@@ -154,9 +154,12 @@ def start_provision(store, cfg: dict, px: Proxmox, agent: dict) -> str | None:
 
 
 def poll_agent(store, cfg: dict, px: Proxmox, agent: dict) -> None:
-    """One poll of the async create task; advances the agent state."""
+    """One poll of the async create task / stack install; advances state."""
     task = agent.get("task")
     vmid = agent.get("vmid")
+    if agent.get("stack_status") == "installing":
+        _poll_stack(store, cfg, px, agent)
+        return
     if not task:
         store.update(agent["id"], status="error", error="provision task missing")
         return
@@ -168,28 +171,125 @@ def poll_agent(store, cfg: dict, px: Proxmox, agent: dict) -> None:
     if state.get("status") == "running":
         return
     if state.get("exitstatus") == "OK" or agent.get("status") != "provisioning":
-        ip = px.container_ip(vmid) if vmid else None
-        if ip is None and vmid:
-            log.warning(
-                "agent %s (vmid %s) is up but its IP could not be auto-detected "
-                "(pct exec may be denied to this API token) — the home is fine; "
-                "find its IP in the Proxmox GUI.",
-                agent["id"], vmid,
-            )
-        store.update(
-            agent["id"],
-            status="running",
-            ip=ip,
-            error=None,
-            task_end=int(time.time()),
-        )
-        log.info("agent %s (vmid %s) is home at %s", agent["id"], vmid, ip)
+        log.info("agent %s (vmid %s) container created — moving to stack phase", agent["id"], vmid)
+        _finish_create(store, cfg, px, agent, ip=None)
     else:
         store.update(
             agent["id"],
             status="error",
             error=f"proxmox task failed: {state.get('exitstatus')}",
             task_end=int(time.time()),
+        )
+
+
+def _finish_create(store, cfg: dict, px: Proxmox, agent: dict, ip: str | None) -> None:
+    """Container is up. If the customer curated a stack, install it; else finish."""
+    stack = agent.get("stack") or []
+    if stack:
+        store.update(
+            agent["id"],
+            ip=ip,
+            error=None,
+            task_end=int(time.time()),
+            stack_status="pending",
+        )
+        _start_stack(store, cfg, px, agent)
+    else:
+        if ip is None:
+            ip = px.container_ip(agent.get("vmid")) if agent.get("vmid") else None
+        _finish_home(store, agent, ip)
+
+
+def _finish_home(store, agent: dict, ip: str | None) -> None:
+    vmid = agent.get("vmid")
+    if ip is None and vmid:
+        log.warning(
+            "agent %s (vmid %s) is up but its IP could not be auto-detected "
+            "(pct exec may be denied to this API token) — the home is fine; "
+            "find its IP in the Proxmox GUI.",
+            agent["id"], vmid,
+        )
+    store.update(
+        agent["id"], status="running", ip=ip, error=None, task_end=int(time.time()),
+    )
+    log.info("agent %s (vmid %s) is home at %s", agent["id"], vmid, ip)
+
+
+# ------------------------------------------------------------ app stacks
+def _start_stack(store, cfg: dict, px: Proxmox, agent: dict) -> None:
+    """Launch the curated stack installer in the container, detached."""
+    from stacks import apt_packages, venv_packages, venv_requested
+
+    stack = agent.get("stack") or []
+    vmid = agent.get("vmid")
+    parts = []
+    pkgs = apt_packages(stack, include_baked=False)
+    if pkgs:
+        parts.append(
+            "DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a "
+            "apt-get update -qq && apt-get install -y -qq --no-install-recommends "
+            + " ".join(pkgs)
+        )
+    if venv_requested(stack):
+        parts.append(
+            "python3 -m venv $HOME/.agentbox-venv && "
+            "$HOME/.agentbox-venv/bin/python -m pip install --upgrade -q "
+            + " ".join(venv_packages())
+        )
+    if not parts or vmid is None:
+        return
+    inner = (
+        " && ".join(parts)
+        + " >/var/log/agenc-stack.log 2>&1; "
+        + "echo $? > /root/.agenc-stack-done"
+    )
+    # Fully detach so pct exec returns immediately; the watchdog polls the marker.
+    launch = f"setsid /bin/bash -c '{inner}' </dev/null >/dev/null 2>&1 & echo launched"
+    result = px.exec(vmid, ["/bin/sh", "-c", launch])
+    store.update(
+        agent["id"],
+        stack_pid=agent.get("id"),
+        stack_status="installing" if result is not None else "failed",
+        stack_started_at=int(time.time()),
+        stack_error=None if result is not None else "could not launch stack installer",
+    )
+    if result is None:
+        log.warning("agent %s: stack installer could not be launched", agent["id"])
+
+
+def _poll_stack(store, cfg: dict, px: Proxmox, agent: dict) -> None:
+    """Poll for the stack-install completion marker, then finalize."""
+    vmid = agent.get("vmid")
+    timeout = int(cfg.get("container", {}).get("stack_timeout_s", 900))
+    if vmid is None:
+        store.update(agent["id"], status="error", error="stack poll: no vmid")
+        return
+    result = px.exec(vmid, ["/bin/sh", "-c", "test -f /root/.agenc-stack-done"])
+    if result is None:  # exec denied — assume install will finish on its own
+        log.warning("agent %s: cannot poll stack marker (exec denied)", agent["id"])
+        return
+    if result[0] != 0:  # marker not yet present
+        started = int(agent.get("stack_started_at") or 0)
+        if started and int(time.time()) - started > timeout:
+            store.update(agent["id"], status="error",
+                         error=f"stack install timed out after {timeout}s "
+                               "(see /var/log/agenc-stack.log in the container)")
+        return
+    # marker exists: read the installer's exit code
+    code_res = px.exec(vmid, ["cat", "/root/.agenc-stack-done"])
+    try:
+        code = int((code_res[1] if code_res else "1").strip() or 1)
+    except (ValueError, TypeError, IndexError):
+        code = 1
+    if code == 0:
+        ip = agent.get("ip") or px.container_ip(vmid)
+        _finish_home(store, agent, ip)
+        store.update(agent["id"], stack_status="done", stack_finished_at=int(time.time()))
+        log.info("agent %s: app stack installed", agent["id"])
+    else:
+        store.update(
+            agent["id"], status="error", stack_status="failed",
+            error="stack install failed (see /var/log/agenc-stack.log in the container)",
         )
 
 

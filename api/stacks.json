@@ -1,0 +1,36 @@
+{
+  "meta": {
+    "source": "https://github.com/codyvolckmar/agent-box",
+    "note": "Group ids/packages mirror agent-box.sh group_pkgs(). 'baked' groups ship in the base template image (proxmox/build-agent-template.sh); 'selectable' groups are installed per-home after creation from the customer's stack choice."
+  },
+  "baked": ["base", "python", "search", "inspect", "git", "data", "net", "dev", "docs"],
+  "groups": [
+    { "id": "base",       "label": "Core tools",            "desc": "curl, wget, git-lfs, build toolchain, jq, tmux, editor, man pages", "packages": ["ca-certificates", "curl", "wget", "gnupg", "openssh-client", "git-lfs", "build-essential", "pkg-config", "cmake", "make", "unzip", "zip", "xz-utils", "tar", "rsync", "file", "patch", "jq", "less", "nano", "vim", "tmux", "man-db", "locales", "tzdata", "lsb-release", "starship", "zoxide"] },
+    { "id": "python",     "label": "Python runtime",           "desc": "python3, venv, headers, pip", "packages": ["python3", "python3-venv", "python3-dev", "python3-pip", "python3-setuptools", "libffi-dev"] },
+    { "id": "search",     "label": "Search & jump",           "desc": "rg, fd, fzf, bat, ag, tree, eza — fast code navigation", "packages": ["ripgrep", "ripgrep-all", "fd-find", "fzf", "bat", "silversearcher-ag", "tree", "eza"] },
+    { "id": "inspect",    "label": "System inspection",        "desc": "htop, btop, procs, ncdu, lsof, iproute2", "packages": ["htop", "btop", "procs", "ncdu", "lsof", "psmisc", "procps", "iproute2", "iputils-ping", "net-tools"] },
+    { "id": "git",        "label": "Git toolbelt",             "desc": "git, LFS, delta pager, GitHub CLI", "packages": ["git", "git-lfs", "git-delta", "gh"] },
+    { "id": "data",       "label": "Data at the CLI",          "desc": "jq, yq, miller, csvtool, sqlite3", "packages": ["jq", "yq", "miller", "csvtool", "sqlite3"] },
+    { "id": "net",        "label": "Networking",               "desc": "nc, socat, dig, ping, traceroute, mtr, openssl", "packages": ["netcat-openbsd", "socat", "bind9-dnsutils", "iputils-ping", "traceroute", "mtr", "openssl"] },
+    { "id": "dev",        "label": "Dev workflow",             "desc": "shellcheck, shfmt, pre-commit, direnv", "packages": ["shellcheck", "shfmt", "pre-commit", "direnv", "patch"] },
+    { "id": "docs",       "label": "Docs tools",               "desc": "pdftotext, qpdf — read PDFs in a terminal", "packages": ["poppler-utils", "qpdf"] },
+    { "id": "media",      "label": "Media & images",           "desc": "ffmpeg, ImageMagick, alsa-utils", "packages": ["ffmpeg", "imagemagick", "alsa-utils"] },
+    { "id": "x11",        "label": "X11 & GUI automation",     "desc": "xdotool, wmctrl, screen capture, clipboard", "packages": ["xdotool", "wmctrl", "x11-utils", "x11-xserver-utils", "xauth", "xclip", "xsel", "scrot", "dbus-x11", "at-spi2-core", "libnotify-bin", "xdg-utils", "fonts-liberation", "fonts-dejavu-core", "fonts-noto-color-emoji"] },
+    { "id": "secrets",    "label": "Secrets",                  "desc": "gnome-keyring, libsecret, age", "packages": ["gnome-keyring", "libsecret-1-0", "libsecret-tools", "age", "pass"] },
+
+    { "id": "containers",   "label": "Containers (podman)",    "desc": "podman + docker alias, rootless user namespaces", "packages": ["podman", "podman-docker", "uidmap", "slirp4netns", "fuse-overlayfs"] },
+    { "id": "databases",    "label": "Database clients",       "desc": "redis, postgres, mysql CLI clients", "packages": ["redis-tools", "postgresql-client", "default-mysql-client"] },
+    { "id": "net-scan",     "label": "Network scanning",       "desc": "nmap, whois", "packages": ["nmap", "whois"] },
+    { "id": "docs-full",    "label": "Docs power tools",       "desc": "pandoc, tesseract OCR", "packages": ["pandoc", "tesseract-ocr"] },
+    { "id": "monitor",      "label": "Monitoring",             "desc": "glances — aggregate system metrics", "packages": ["glances"] },
+    { "id": "shell-history","label": "Shell history",          "desc": "atuin — searchable, encrypted shell history", "packages": ["atuin"] },
+    { "id": "headless",     "label": "Headless desktop",       "desc": "Xvfb, x11vnc, openbox, fluxbox, xterm — a virtual display", "packages": ["xvfb", "x11vnc", "openbox", "fluxbox", "xterm"] },
+    { "id": "desktop-build","label": "Desktop build deps",     "desc": "gtk3 libs, rpm, fakeroot, dpkg-dev", "packages": ["libgtk-3-0", "libnotify4", "libxtst6", "rpm", "fakeroot", "dpkg-dev"] }
+  ],
+  "venv": {
+    "id": "agent-python",
+    "label": "Python agent toolbelt",
+    "desc": "Creates ~/.agentbox-venv with wheel-only agent packages (requests, httpx, rich, typer, pydantic, pytest, ruff, ipython, uv, pypdf, bs4, Pillow…)",
+    "packages": ["pip", "setuptools", "wheel", "packaging", "requests", "httpx", "httpie", "pydantic", "pydantic-settings", "typer", "rich", "prompt-toolkit", "textual", "jinja2", "pyyaml", "tomli-w", "jsonschema", "python-dotenv", "tenacity", "orjson", "tqdm", "python-dateutil", "rapidfuzz", "markdown", "psutil", "watchdog", "pypdf", "openpyxl", "Pillow", "python-docx", "beautifulsoup4", "pytest", "ruff", "mypy", "ipython", "ipdb", "uv"]
+  }
+}

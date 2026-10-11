@@ -201,6 +201,11 @@
           <textarea name="purpose" rows="3" maxlength="500"
                     placeholder="e.g. research agent that indexes my notes"></textarea>
         </label>
+        <fieldset class="stack-picker" id="stack-picker">
+          <legend>Curate your app stack <em>(optional)</em></legend>
+          <p class="fine" id="stack-baked">Loading stack options…</p>
+          <div class="stack-grid" id="stack-options"></div>
+        </fieldset>
         <label>
           <span>SSH public key <em>(recommended)</em></span>
           <textarea name="ssh_key" rows="3" placeholder="ssh-ed25519 AAAA…"></textarea>

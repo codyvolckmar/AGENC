@@ -181,27 +181,34 @@ class Proxmox:
             return {"status": "running", "vmid": vmid, "uptime": 60}
         return self._request("GET", f"/nodes/{self.node}/lxc/{vmid}/status/current")
 
-    def exec(self, vmid: int, command: list[str]) -> str | None:
-        """Run a command in the container and return stdout (or None)."""
+    def exec(self, vmid: int, command: list[str]) -> tuple[int, str] | None:
+        """Run a command in the container. Returns (exitstatus, stdout) or None."""
         if self.dry_run:
             self._sim("POST", f"/nodes/{self.node}/lxc/{vmid}/exec", {"command": command})
-            return f"10.10.{(vmid >> 8) % 128}.{vmid % 256}\n"
-        out = self._request(
-            "POST",
-            f"/nodes/{self.node}/lxc/{vmid}/exec",
-            {"command": json.dumps(command)},
-        )
+            joined = " ".join(command)
+            if "test -f" in joined or (command and command[0] == "test"):
+                return 0, ""
+            if command and command[0] == "cat":
+                return 0, "0\n"  # stack-done marker says success
+            return 0, f"10.10.{(vmid >> 8) % 128}.{vmid % 256}\n"
+        try:
+            out = self._request(
+                "POST",
+                f"/nodes/{self.node}/lxc/{vmid}/exec",
+                {"command": json.dumps(command)},
+            )
+        except ProxmoxError:
+            return None
         if isinstance(out, dict):
-            return out.get("out-data")
-        return None
+            return int(out.get("exitstatus") or 0), str(out.get("out-data") or "")
+        return 0, ""
 
     def container_ip(self, vmid: int) -> str | None:
         """Best-effort IPv4 of the container (needs working /exec)."""
-        try:
-            raw = self.exec(vmid, ["hostname", "-I"]) or ""
-        except ProxmoxError:
+        result = self.exec(vmid, ["hostname", "-I"])
+        if not result or result[0] != 0:
             return None
-        for token in raw.split():
+        for token in result[1].split():
             if token.count(".") == 3 and not token.startswith(("0.", "169.254")):
                 return token
         return None
