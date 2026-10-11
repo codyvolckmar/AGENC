@@ -29,15 +29,13 @@
   "container": {
     "vmid_start": 1000,
     "vmid_end": 1999,
-    "memory_mb": 2048,
     "swap_mb": 512,
-    "disk_gb": 8,
-    "cores": 0,
-    "cpuunits": 1024,
     "cpulimit": null,
     "unprivileged": true,
     "net_bridge": "sandbox",
     "net_preflight": true,
+    "disk_preflight": true,
+    "disk_headroom_pct": 10,
     "ip": "dhcp",
     "features": "nesting=1",
     "ostype": "ubuntu",
@@ -49,9 +47,21 @@
     "stack_timeout_s": 900
   },
 
+  "plans": {
+    "micro":    { "memory_mb": 512,  "disk_gb": 4,  "cores": 1, "cpuunits": 256,  "price_usd_per_hour": 0.05 },
+    "nano":     { "memory_mb": 1024, "disk_gb": 6,  "cores": 2, "cpuunits": 512,  "price_usd_per_hour": 0.10 },
+    "standard": { "memory_mb": 2048, "disk_gb": 8,  "cores": 0, "cpuunits": 1024, "price_usd_per_hour": 0.30 }
+  },
+
   "billing": {
     "free_tier_containers": 1,
-    "price_usd_per_container_per_month": 5.0,
+    "metered": true,
+    "free_credit_usd": 2.0,
+    "low_balance_warn_usd": 0.25,
+    "deposit_hours": 24,
+    "tick_interval_s": 60,
+    "max_backfill_s": 86400,
+    "default_plan": "standard",
     "accepted_assets": ["USDC", "USDT"],
     "chains": {
       "USDC": { "chain": "ethereum", "network": "ERC-20" },

@@ -23,11 +23,17 @@ def _pick_asset(agent_id: str, assets: list[str]) -> str:
     return assets[digest % len(assets)]
 
 
-def create_quote(agent_id: str, billing: dict) -> dict:
-    """Build a quote dict for one agent home."""
+def create_quote(agent_id: str, billing: dict, amount_usd: float | None = None,
+                 plan: str | None = None) -> dict:
+    """Build a quote dict for one agent home.
+
+    The amount is the plan's deposit (price/hr x deposit_hours), computed
+    by the caller; the customer sends it with memo=reference and the home
+    is credited that amount on confirmation (see billing.renew-free path).
+    """
     assets = billing.get("accepted_assets") or ["USDC", "USDT"]
     asset = _pick_asset(agent_id, assets)
-    amount = billing.get("price_usd_per_container_per_month", 5.0)
+    amount = float(amount_usd) if amount_usd is not None else 0.0
     chain_info = billing.get("chains", {}).get(asset, {})
     addresses = billing.get("receive_addresses", {})
     valid_hours = int(billing.get("quote_valid_hours", 72))
@@ -35,8 +41,8 @@ def create_quote(agent_id: str, billing: dict) -> dict:
     quote = {
         "id": f"qt-{agent_id}",
         "asset": asset,
-        "amount": f"{float(amount):.2f}",
-        "price_usd_per_month": f"{float(amount):.2f}",
+        "amount": f"{amount:.2f}",
+        "plan": plan,
         "chain": chain_info.get("chain", "ethereum"),
         "network": chain_info.get("network", "ERC-20"),
         "address": addresses.get(asset, ""),
@@ -48,7 +54,8 @@ def create_quote(agent_id: str, billing: dict) -> dict:
     quote["note"] = (
         f"Send exactly {quote['amount']} {quote['asset']} on "
         f"{quote['chain']} ({quote['network']}) to {quote['address']} "
-        f"with memo {quote['reference']}."
+        f"with memo {quote['reference']}. This buys {float(amount):.2f} USD "
+        f"of metered run time at the {plan or ''} plan rate."
     )
     return quote
 

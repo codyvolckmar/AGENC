@@ -23,8 +23,9 @@ from proxmox import Proxmox, ProxmoxError
 log = logging.getLogger("agenc.provisioning")
 
 
-def _host_cores(px: Proxmox, cfg: dict) -> int:
-    cores = int(cfg.get("container", {}).get("cores") or 0)
+def _host_cores(px: Proxmox, cfg: dict, requested: int = 0) -> int:
+    """Resolve the core count: plan value, or all host cores when 0."""
+    cores = int(requested or 0)
     if cores > 0:
         return cores
     try:
@@ -35,13 +36,50 @@ def _host_cores(px: Proxmox, cfg: dict) -> int:
     if not cpus:
         raise ProxmoxError(
             "Could not determine host CPU count for shared-core allocation. "
-            "Set container.cores explicitly in config.json."
+            "Set cores on the plan in config.json."
         )
     return cpus
 
 
+def _disk_preflight(px: Proxmox, cfg: dict, disk_gb: int) -> None:
+    """Enough free bytes on rootfs_storage for this home? (best-effort).
+
+    Fails fast with a readable error instead of a half-created container;
+    if the storage cannot be inspected (permissions, dry network) we let
+    the create call surface the truth.
+    """
+    c = cfg["container"]
+    if not bool(c.get("disk_preflight", True)):
+        return
+    storage = cfg["proxmox"].get("rootfs_storage", "local-lvm")
+    try:
+        status = px.storage_status(storage)
+    except ProxmoxError as exc:
+        log.warning(
+            "disk preflight: cannot stat storage '%s' — continuing; the create "
+            "will surface any real error (%s)", storage, exc)
+        return
+    if not bool(status.get("enabled", 1)):
+        log.warning("disk preflight: storage '%s' reports disabled — continuing", storage)
+        return
+    avail = int(status.get("avail") or 0)
+    headroom_pct = float(c.get("disk_headroom_pct", 10) or 0)
+    headroom = 1.0 + headroom_pct / 100.0
+    if avail < int(disk_gb * headroom * 1024 ** 3):
+        raise ProxmoxError(
+            f"storage '{storage}' is low on space: {avail / 1073741824:.1f} GB free, "
+            f"need {disk_gb * headroom:.1f} GB for this home "
+            f"(disk_headroom_pct={headroom_pct:g}). Free space or pick a smaller plan."
+        )
+
+
 def build_params(px: Proxmox, cfg: dict, agent: dict) -> tuple[int, str, int, dict]:
-    """Draft the PVE LXC create payload. Returns (vmid, template, cores, params)."""
+    """Draft the PVE LXC create payload. Returns (vmid, template, cores, params).
+
+    Sizing comes from the agent's plan (stored on the record at request
+    time): memory_mb, disk_gb, cores (0 = all host cores, shared),
+    cpuunits, price_per_hour. Disk headroom is preflighted first.
+    """
     pve_cfg = cfg["proxmox"]
     c = cfg["container"]
 
@@ -51,7 +89,12 @@ def build_params(px: Proxmox, cfg: dict, agent: dict) -> tuple[int, str, int, di
             f"VMID range {c['vmid_start']}-{c['vmid_end']} exhausted — no homes left."
         )
     template = px.pick_template(pve_cfg.get("os_template"))
-    cores = _host_cores(px, cfg)
+
+    memory = int(agent.get("memory_mb") or 2048)
+    disk_gb = int(agent.get("disk_gb") or 8)
+    cores = _host_cores(px, cfg, int(agent.get("cores") or 0))
+    cpuunits = int(agent.get("cpuunits") or c.get("cpuunits", 1024))
+    _disk_preflight(px, cfg, disk_gb)
 
     ip = c.get("ip", "dhcp")
     bridge = c["net_bridge"]
@@ -84,11 +127,11 @@ def build_params(px: Proxmox, cfg: dict, agent: dict) -> tuple[int, str, int, di
         "vmid": vmid,
         "ostemplate": template,
         "hostname": agent["hostname"],
-        "memory": c["memory_mb"],
+        "memory": memory,
         "swap": c.get("swap_mb", 512),
         "cores": cores,
-        "cpuunits": c.get("cpuunits", 1024),
-        "rootfs": f"{pve_cfg['rootfs_storage']}:{c['disk_gb']}",
+        "cpuunits": cpuunits,
+        "rootfs": f"{pve_cfg['rootfs_storage']}:{disk_gb}",
         "net0": net0,
         "features": c.get("features", "nesting=1,keyctl=1"),
         "unprivileged": 1 if c.get("unprivileged", True) else 0,
@@ -308,4 +351,38 @@ def destroy_home(store, cfg: dict, px: Proxmox, agent: dict) -> None:
     quote = agent.get("quote")
     if quote:
         agent["quote"] = cancel(quote)
-    store.update(agent["id"], status="destroyed", destroyed_at=int(time.time()))
+    store.update(agent["id"], status="destroyed", destroyed_at=int(time.time()),
+                 destroy_scheduled_at=None)
+
+
+# -------------------------------------------------- scheduled destroy
+# TTL / "destroy me at T" — the Lium `--ttl`/`--until` analog. The watchdog
+# executes it; billing stops the moment the container is gone.
+
+def schedule_destroy_at(store, agent: dict, destroy_at: int | None) -> dict:
+    """Set (epoch seconds) or clear (None) a scheduled destroy."""
+    store.update(agent["id"], destroy_scheduled_at=destroy_at)
+    return store.get(agent["id"])
+
+
+def process_schedules(store, cfg: dict, px: Proxmox) -> None:
+    """Watchdog pass: destroy homes whose scheduled time has passed."""
+    now = int(time.time())
+    for agent in store.all():
+        if agent.get("status") == "destroyed":
+            continue
+        due = agent.get("destroy_scheduled_at")
+        if not due:
+            continue
+        try:
+            due = int(due)
+        except (TypeError, ValueError):
+            continue
+        if now < due:
+            continue
+        try:
+            destroy_home(store, cfg, px, agent)
+            log.info("scheduled destroy executed for %s (was due %s)", agent["id"], due)
+        except ProxmoxError as exc:
+            log.warning("scheduled destroy failed for %s: %s — retrying next pass",
+                        agent["id"], exc)

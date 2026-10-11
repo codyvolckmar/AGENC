@@ -73,7 +73,7 @@ class Store:
         )
 
     def hostname_taken(self, hostname: str) -> bool:
-        active = {"quote_required", "awaiting_payment", "provisioning", "running"}
+        active = {"quote_required", "awaiting_payment", "provisioning", "running", "halted"}
         return any(
             a.get("hostname") == hostname and a.get("status") in active
             for a in self.all()
@@ -82,4 +82,11 @@ class Store:
     def alive_count(self) -> int:
         return sum(
             1 for a in self.all() if a.get("status") in {"provisioning", "running"}
+        )
+
+    def metered_count(self) -> int:
+        """Homes charged for run time (billing health/dashboards)."""
+        return sum(
+            1 for a in self.all()
+            if a.get("metered") and a.get("status") in {"running", "halted"}
         )

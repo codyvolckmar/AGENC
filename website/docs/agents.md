@@ -11,11 +11,15 @@ AGENCY is a small self-hosted hosting provider: a website plus a provisioning
 API that spin up dedicated container homes for AI agents on your own
 [Proxmox VE] node.
 
-- First home **free** — no card, no signup ceremony.
+- First home **free** — no card, no signup ceremony; free homes start with a
+  small slice of run-time credit (`billing.free_credit_usd`, default $2).
 - Every further web-provisioned home is **quoted in USDC/USDT** (stablecoin)
-  with a unique payment reference.
-- Agents get **2 GB RAM**, the full shared CPU pool, and **up to 8 GB disk**
-  to start (all configurable).
+  with a unique payment reference; the confirmed amount becomes the home's
+  run-time credit.
+- **Plans, not fixed sizing** — pick `micro`, `nano` or `standard`
+  (RAM / disk / cores → USD per hour) when you request a home.
+- **Metered per second** while running, with a ledger, a per-home statement,
+  low-balance warnings, and an automatic halt at zero credit.
 - Zero third-party dependencies: Python 3 standard library only.
 
 This document is the contract for driving that API from a shell or from an
@@ -50,7 +54,7 @@ write endpoints. Admin actions use `X-Admin-Key` instead.
 | Header | Holds | Used by |
 |---|---|---|
 | `X-Agency-Secret` | the site secret | `POST /api/agents` (public write) |
-| `X-Admin-Key` | the admin key | `confirm-payment`, `retry`, `destroy` |
+| `X-Admin-Key` | the admin key | `confirm-payment`, `renew`, `statement`, `schedule-destroy`, `retry`, `destroy` |
 
 Secrets are compared in constant time. If `site_secret` is empty the API is
 open and logs a warning — that is a development mode, not a production state.
@@ -63,12 +67,16 @@ Everything is under `/api`. Public read endpoints need no header.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `GET` | `/api/health` | — | node CPU/mem, live agent counts, free-tier usage, Proxmox reachability |
+| `GET` | `/api/health` | — | node CPU/mem, storage free, live agent counts, plans, free-tier usage |
+| `GET` | `/api/plans` | — | plan tiers: RAM / disk / cores / price-per-hour, default, deposit size |
 | `GET` | `/api/stacks` | — | curate-your-stack catalog: baked groups, selectable add-ons, venv option, max |
-| `POST` | `/api/agents` | site secret | request an agent home (free → auto-provision, later → quote); body may include `"stack": [group ids]` |
+| `POST` | `/api/agents` | site secret | request an agent home (free → auto-provision, later → quote); body may include `"plan"` and `"stack"` |
 | `GET` | `/api/agents` | — | all agent summaries (no PII, no SSH keys) |
-| `GET` | `/api/agents/<id>` | — | one agent: status, IP, quote |
-| `POST` | `/api/agents/<id>/confirm-payment` | admin | mark USDC/USDT paid → provision |
+| `GET` | `/api/agents/<id>` | — | one agent: status, IP, specs, plan, credit balance |
+| `POST` | `/api/agents/<id>/confirm-payment` | admin | mark USDC/USDT paid → credit + provision |
+| `GET` | `/api/agents/<id>/statement` | admin | the per-home billing statement (ledger, newest first) |
+| `POST` | `/api/agents/<id>/renew` | admin | add credit (`amount_usd` or `hours`); restarts a halted home |
+| `POST` | `/api/agents/<id>/schedule-destroy` | admin | TTL: `{"ttl_seconds": N}` / `{"destroy_at": epoch}` / `{"cancel": true}` |
 | `POST` | `/api/agents/<id>/retry` | admin | retry a failed provisioning |
 | `POST` | `/api/agents/<id>/destroy` | admin | delete the LXC, reclaim disk |
 
@@ -80,6 +88,7 @@ Everything is under `/api`. Public read endpoints need no header.
 |---|---|---|
 | `hostname` | yes | 2–42 chars, lowercase letters, digits, dashes |
 | `email` | yes | a valid-ish email (used for the quote / delivery note) |
+| `plan` | no | `micro` / `nano` / `standard` (see `GET /api/plans`); defaults to `billing.default_plan` |
 | `purpose` | no | free text under 500 chars |
 | `ssh_key` | no | an OpenSSH public key, installed into the home |
 | `stack` | no | list of stack-group ids (see `GET /api/stacks`), ≤ max |
@@ -112,9 +121,57 @@ answers `409` (`conflict`). Requests are rate-limited per IP.
 
 Send the stablecoin with the `reference` in the memo; once the transfer is
 confirmed (operator, or a payment webhook wired to `confirm-payment`), the
-home provisions. Setting `billing.free_tier_containers` to `0` disables
-billing entirely — every home provisions instantly (`/api/health` reports
-`free_tier.unlimited: true`).
+confirmed amount lands on the home as **run-time credit** and provisioning
+starts. Setting `billing.free_tier_containers` to `0` makes every home free
+(still metered — free homes buy `billing.free_credit_usd` of credit).
+
+## Plans & metered billing
+
+Every home runs on a plan. `GET /api/plans` is public and returns the
+catalog plus the shop defaults:
+
+```json
+{"ok": true, "metered": true, "default_plan": "standard",
+ "deposit_hours": 24, "free_credit_usd": 2.0, "low_balance_warn_usd": 0.25,
+ "plans": [
+   {"id": "micro",    "memory_mb": 512,  "disk_gb": 4, "cores": 1,
+    "cpuunits": 256,  "price_usd_per_hour": 0.05, "deposit_usd": 1.2},
+   {"id": "nano",     "memory_mb": 1024, "disk_gb": 6, "cores": 2,
+    "cpuunits": 512,  "price_usd_per_hour": 0.10, "deposit_usd": 2.4},
+   {"id": "standard", "memory_mb": 2048, "disk_gb": 8, "cores": 0,
+    "cpuunits": 1024, "price_usd_per_hour": 0.30, "deposit_usd": 7.2}
+ ]}
+```
+
+`cores: 0` means the plan shares the whole host CPU pool (like the original
+home spec); fixed-core plans get a pinned slice. While a home is `running`
+the watchdog meters it **per second** at `price_usd_per_hour`:
+
+- **credit** (`credit_usd`) is bought up front — free homes get
+  `free_credit_usd`, paid homes get the confirmed quote amount.
+- each tick appends to the home's **ledger** and moves money from
+  `credit_usd` to `billed_total_usd`; `balance_usd = credit - billed`.
+- balance below `low_balance_warn_usd` sets `balance_low: true` — the home
+  warns but keeps running.
+- balance at $0 → the container is **stopped and `halted`**. Billing stops;
+  renew or destroy to act. A halted home keeps its hostname until destroyed.
+
+Elapsed time is metered in fractional seconds from the last tick and capped
+at `billing.max_backfill_s` (1 day) so an outage of many days doesn't bill
+for time nobody could intervene.
+
+### Statement, renew, TTL
+
+- `GET /api/agents/<id>/statement` (admin) returns the ledger newest-first
+  plus the summary: plan, price/hr, credit, billed, balance, and the tick
+  cadence. Use it for disputes and for closing an account.
+- `POST /api/agents/<id>/renew` (admin) adds credit — `{"amount_usd": 5}` or
+  `{"hours": 12}` (hours × price/hr). A `halted` home restarts and resumes
+  metering.
+- `POST /api/agents/<id>/schedule-destroy` (admin) is the TTL:
+  `{"ttl_seconds": 3600}` destroys in an hour, `{"destroy_at": <epoch>}` at a
+  wall-clock time, `{"cancel": true}` cancels. The watchdog executes it and
+  billing stops the moment the container is gone.
 
 ## Lifecycle
 
@@ -122,9 +179,10 @@ billing entirely — every home provisions instantly (`/api/health` reports
 |---|---|
 | `quote_required` | paid path: waiting for payment |
 | `provisioning` | LXC create task running; the watchdog polls it |
-| `running` | container is up; `ip` is set when it could be detected |
+| `running` | container is up and metering; `ip` is set when detected |
+| `halted` | credit hit $0 — container stopped, billing stopped |
 | `error` | something failed; the REAL reason is on the record, fix and `retry` |
-| `destroyed` | deleted via `destroy` (a destroyed free home frees its slot) |
+| `destroyed` | deleted via `destroy` or a scheduled TTL (frees the free slot) |
 
 The server's watchdog advances provisioning on its own — you only ever poll
 `GET /api/agents/<id>` until `status` is `running` (or `error`). A curated
