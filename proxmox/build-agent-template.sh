@@ -217,9 +217,42 @@ print(", ".join(manifest.get("baked", [])))
 PY
 }
 echo "    baked groups : $(baked_ids)"
-echo "    package count: $(echo "$PACKAGES" | wc -w)"
+echo "    package count: $(echo "$PACKAGES" | wc -w) requested"
+
+step "4a. apt-get update in the build container"
 run pct exec "$VMID" -- bash -c \
-  "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq $PACKAGES && apt-get upgrade -y -qq"
+  "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq"
+
+step "4b. Resolve installable packages (apt-candidate probe; skip unavailable)"
+TMP_RESOLVE="$(mktemp)"
+cat > "$TMP_RESOLVE" <<'RESOLVE'
+#!/usr/bin/env bash
+# prints apt-installable names from AGENC_PKGS; trouble names go to stderr
+for p in $AGENC_PKGS; do
+  cand="$(apt-cache policy "$p" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
+  case "$cand" in
+    ""|"(none)") echo "  skip $p (no apt candidate)" >&2 ;;
+    *) echo "$p" ;;
+  esac
+done
+RESOLVE
+run pct push "$VMID" "$TMP_RESOLVE" /usr/local/sbin/agenc-resolve.sh
+rm -f "$TMP_RESOLVE"
+AVAIL="$(pct exec "$VMID" -- env AGENC_PKGS="$PACKAGES" /usr/local/sbin/agenc-resolve.sh \
+  2>/tmp/agenc-resolve.err)"
+if [ -s /tmp/agenc-resolve.err ]; then cat /tmp/agenc-resolve.err; fi
+rm -f /tmp/agenc-resolve.err
+if [ -z "$AVAIL" ]; then
+  echo "!! nothing installable (all package names rejected?) — aborting" >&2
+  exit 1
+fi
+echo "    installing $(echo "$AVAIL" | wc -l) package(s)"
+
+step "4c. Install + upgrade"
+run pct exec "$VMID" -- bash -c \
+  "export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a; \
+   apt-get install -y -qq --no-install-recommends $(echo "$AVAIL" | tr '\n' ' ') && \
+   apt-get upgrade -y -qq"
 
 step "5. Bake base config (motd, timezone, /opt/agency)"
 pct exec "$VMID" -- bash -c "cat > /etc/motd <<'EOF'
