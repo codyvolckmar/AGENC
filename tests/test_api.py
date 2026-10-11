@@ -139,8 +139,10 @@ class AgencyTest(unittest.TestCase):
         self.assertTrue(res["proxmox"]["reachable"])
         self.assertTrue(res["proxmox"]["auth_ok"])
         self.assertGreater(res["templates_available"], 0)
-        self.assertEqual(res["free_tier"]["limit"], 1)
+        self.assertEqual(res["trial"]["days"], 30)
+        self.assertIsInstance(res["trial"]["on_trial"], int)
         self.assertIsInstance(res["agents"]["alive"], int)
+        self.assertIsInstance(res["agents"]["prepaid"], int)
         self.assertGreater(res["cpus"], 0)
         self.assertEqual(res["net_bridge"], "sandbox")
         self.assertTrue(res["net_bridge_ok"])  # dry-run pretends sandbox exists
@@ -155,9 +157,11 @@ class AgencyTest(unittest.TestCase):
         }, secret=SITE_SECRET)
         self.assertEqual(code, 201)
         agent = res["agent"]
-        self.assertTrue(agent["free_tier"])
+        self.assertTrue(agent["free_tier"])      # every home starts on the trial
+        self.assertEqual(agent["trial_days"], 30)
         self.assertIn(agent["status"], ("provisioning", "running"))
-        self.assertIsNone(agent.get("quote"))
+        # a quote is on hand immediately — pay whenever during the trial
+        self.assertEqual(agent["quote"]["amount"], "32.00")
 
         agent = self.wait_status(agent["id"], "running")
         self.assertEqual(agent["memory_mb"], 8192)   # standard plan
@@ -166,8 +170,9 @@ class AgencyTest(unittest.TestCase):
         self.assertEqual(agent["price_usd_per_month"], 32.0)
         self.assertEqual(agent["billing_period"], "monthly")
         self.assertEqual(agent["period_days"], 30)
-        self.assertEqual(agent["periods_bought"], 1)   # first period free
+        self.assertEqual(agent["periods_bought"], 0)  # the trial is not a payment
         self.assertEqual(agent["billed_total_usd"], 0.0)
+        self.assertTrue(agent["on_trial"])
         self.assertGreater(agent["remaining_s"], 28 * 86400)
         self.assertLessEqual(agent["remaining_s"], 30 * 86400)
         self.assertFalse(agent["expiring"])
@@ -191,15 +196,17 @@ class AgencyTest(unittest.TestCase):
         code, _ = self.api.post("/api/agents/no-such-id/confirm-payment", admin="wrong")
         self.assertEqual(code, 403)
 
-    def test_paid_home_gets_stablecoin_quote_and_provisions_on_payment(self):
+    def test_paid_home_payment_extends_the_trial(self):
         code, res = self.api.post("/api/agents", {
             "hostname": "paid-1",
             "email": "money@example.com",
         }, secret=SITE_SECRET)
         self.assertEqual(code, 201)
         agent = res["agent"]
-        self.assertEqual(agent["status"], "quote_required")
-        self.assertFalse(agent["free_tier"])
+        # provisioned immediately on the trial; payment extends the window
+        self.assertIn(agent["status"], ("provisioning", "running"))
+        self.assertTrue(agent["free_tier"])
+        self.assertTrue(agent["on_trial"])
 
         quote = agent["quote"]
         self.assertIn(quote["asset"], ("USDC", "USDT"))
@@ -213,7 +220,7 @@ class AgencyTest(unittest.TestCase):
         self.assertEqual(agent["plan"], "standard")
         self.assertEqual(agent["price_usd_per_month"], 32.0)
         self.assertEqual(agent["billing_period"], "monthly")
-        self.assertIsNone(agent.get("paid_until"))   # nothing prepaid yet
+        self.assertIsNotNone(agent.get("paid_until"))   # the 30-day trial
 
         # payment must be confirmed by an operator/webhook
         code, _ = self.api.post(f"/api/agents/{agent['id']}/confirm-payment")
@@ -226,15 +233,17 @@ class AgencyTest(unittest.TestCase):
             f"/api/agents/{agent['id']}/confirm-payment", admin=ADMIN_KEY)
         self.assertEqual(code, 200)
         self.assertEqual(res["agent"]["quote"]["status"], "paid")
-        self.assertEqual(res["agent"]["status"], "provisioning")
+        self.assertFalse(res["agent"]["on_trial"])
         self.assertAlmostEqual(res["agent"]["billed_total_usd"], 32.0, places=2)
         self.assertEqual(res["agent"]["periods_bought"], 1)
-        self.assertIsNotNone(res["agent"]["paid_until"])
-        self.assertGreater(res["agent"]["remaining_s"], 29 * 86400)
+        # the 30-day trial is honored in full, then the paid month begins
+        self.assertGreater(res["agent"]["remaining_s"], 59 * 86400)
+        self.assertLessEqual(res["agent"]["remaining_s"], 60 * 86400)
 
         agent = self.wait_status(agent["id"], "running")
         self.assertTrue(agent["ip"])
         self.assertEqual(agent["quote"]["status"], "paid")
+        self.assertIn(agent["status"], ("provisioning", "running"))
 
     def test_validation(self):
         cases = [
@@ -277,11 +286,11 @@ class AgencyTest(unittest.TestCase):
         self.assertIsNone(res["agent"].get("error"))
         self.wait_status(agent["id"], "running")
 
-    def test_unlimited_free_tier_mode(self):
-        """free_tier_containers: 0 = billing off — every home provisions instantly."""
+    def test_trial_can_be_disabled(self):
+        """trial_days: 0 = dev mode — homes provision and never expire."""
         with tempfile.TemporaryDirectory(prefix="agenc-free-") as d:
             cfg = make_config(d)
-            cfg["billing"]["free_tier_containers"] = 0
+            cfg["billing"]["trial_days"] = 0
             srv = build_server(cfg)
             thread = threading.Thread(target=srv.serve_forever, daemon=True)
             thread.start()
@@ -291,12 +300,16 @@ class AgencyTest(unittest.TestCase):
                     "hostname": "free-forever-1", "email": "f@example.com",
                 }, secret=SITE_SECRET)
                 self.assertEqual(code, 201)
-                self.assertTrue(res["agent"]["free_tier"])
                 self.assertIn(res["agent"]["status"], ("provisioning", "running"))
-                self.assertIsNone(res["agent"].get("quote"))
+                self.assertIsNone(res["agent"].get("paid_until"))
+                self.assertIsNone(res["agent"].get("remaining_s"))
                 code, health = api.get("/api/health")
                 self.assertEqual(code, 200)
-                self.assertTrue(health["free_tier"]["unlimited"])
+                self.assertEqual(health["trial"]["days"], 0)
+                time.sleep(1.5)  # several watchdog passes: no halt, no delete
+                _, res = api.get("/api/agents")
+                for a in res["agents"]:
+                    self.assertIn(a["status"], ("provisioning", "running"))
             finally:
                 srv.shutdown()
                 srv.server_close()
@@ -328,7 +341,6 @@ class AgencyTest(unittest.TestCase):
         """Customer-curated stack persists and the home reaches running (dry-run)."""
         with tempfile.TemporaryDirectory(prefix="agenc-stack-") as d:
             cfg = make_config(d)
-            cfg["billing"]["free_tier_containers"] = 0
             srv = build_server(cfg)
             thread = threading.Thread(target=srv.serve_forever, daemon=True)
             thread.start()
@@ -511,7 +523,7 @@ class AgencyTest(unittest.TestCase):
         self.assertTrue(res["ok"])
         self.assertEqual(res["default_plan"], "standard")
         self.assertEqual(res["default_period"], "monthly")
-        self.assertEqual(res["free_periods"], 1)
+        self.assertEqual(res["trial_days"], 30)
         self.assertEqual(list(res["periods"].keys()),
                          ["weekly", "fortnightly", "monthly"])
         self.assertEqual(res["periods"]["monthly"]["days"], 30)
@@ -533,8 +545,8 @@ class AgencyTest(unittest.TestCase):
         self.assertEqual(standard["period_prices"]["monthly"], 32.0)
 
     def test_plan_and_period_validation(self):
-        # shared server's free slot is consumed by now -> quote_required, but
-        # the plan/period specs land on the record and drive the quote amount
+        # every home provisions immediately on the trial; plan/period specs
+        # land on the record and drive the quote amount
         code, res = self.api.post("/api/agents", {
             "hostname": "plan-micro-1", "email": "m@e.c",
             "plan": "micro", "period": "weekly",
@@ -548,7 +560,9 @@ class AgencyTest(unittest.TestCase):
         self.assertEqual(agent["billing_period"], "weekly")
         self.assertEqual(agent["period_days"], 7)
         self.assertEqual(agent["period_price_usd"], 2.0)
-        self.assertEqual(agent["status"], "quote_required")
+        self.assertIn(agent["status"], ("provisioning", "running"))
+        self.assertEqual(agent["trial_days"], 30)   # the trial is fixed, not the period
+        self.assertTrue(agent["on_trial"])
         self.assertEqual(agent["quote"]["plan"], "micro")
         self.assertEqual(agent["quote"]["period"], "weekly")
         self.assertEqual(agent["quote"]["amount"], "2.00")
@@ -564,10 +578,42 @@ class AgencyTest(unittest.TestCase):
         self.assertEqual(code, 422)
         self.assertIn("unknown billing period", res["error"]["message"])
 
-    def test_period_billing_expiry_halt_renew_statement(self):
+    def test_trial_home_deleted_at_expiry(self):
+        """No payment by the end of the free trial -> the VM is deleted."""
+        with tempfile.TemporaryDirectory(prefix="agenc-trial-") as d:
+            cfg = make_config(d)
+            srv, api = self._spin_server(cfg)
+            try:
+                code, res = api.post("/api/agents", {
+                    "hostname": "trial-1", "email": "t@e.c",
+                }, secret=SITE_SECRET)
+                self.assertEqual(code, 201)
+                a = self._wait_status(api, res["agent"]["id"], "running")
+                self.assertTrue(a["on_trial"])
+                self.assertGreater(a["remaining_s"], 28 * 86400)
+                # warn window: expiring flag flips when the end is near
+                srv.state["store"].update(a["id"],
+                                           paid_until=time.time() + 100)
+                deadline = time.time() + 10
+                while time.time() < deadline:
+                    _, res = api.get(f"/api/agents/{a['id']}")
+                    if res["agent"].get("expiring"):
+                        break
+                    time.sleep(0.3)
+                self.assertTrue(res["agent"]["expiring"])
+                # the trial ends with no payment: deleted, not halted
+                srv.state["store"].update(a["id"],
+                                           paid_until=time.time() - 10)
+                destroyed = self._wait_status(api, a["id"], "destroyed")
+                self.assertIn("trial", destroyed.get("destroyed_reason", ""))
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
+    def test_paid_home_halts_at_expiry_and_renews(self):
+        """A paying home that lapses halts (never deletes) and renews."""
         with tempfile.TemporaryDirectory(prefix="agenc-bill-") as d:
             cfg = make_config(d)
-            cfg["billing"]["free_tier_containers"] = 0
             srv, api = self._spin_server(cfg)
             try:
                 code, res = api.post("/api/agents", {
@@ -576,32 +622,22 @@ class AgencyTest(unittest.TestCase):
                 self.assertEqual(code, 201)
                 agent = res["agent"]
                 self.assertTrue(agent["free_tier"])
-                self.assertEqual(agent["plan"], "standard")
-                self.assertEqual(agent["billing_period"], "monthly")
-                # the first period is free: a ~30-day prepaid window
                 a = self._wait_status(api, agent["id"], "running")
-                self.assertGreater(a["remaining_s"], 28 * 86400)
-                self.assertLessEqual(a["remaining_s"], 30 * 86400)
-                self.assertEqual(a["periods_bought"], 1)
-                self.assertEqual(a["billed_total_usd"], 0.0)
-                self.assertFalse(a["expiring"])
-                # push paid_until into the warn window -> expiring flag
-                srv.state["store"].update(agent["id"],
-                                           paid_until=time.time() + 100)
-                deadline = time.time() + 10
-                while time.time() < deadline:
-                    _, res = api.get(f"/api/agents/{agent['id']}")
-                    if res["agent"].get("expiring"):
-                        break
-                    time.sleep(0.3)
-                self.assertTrue(res["agent"]["expiring"])
-                # push it into the past -> the watchdog halts the home
+                # pay for the first month: 30-day trial + 30-day period
+                code, res = api.post(
+                    f"/api/agents/{agent['id']}/confirm-payment",
+                    admin=ADMIN_KEY)
+                self.assertEqual(code, 200)
+                self.assertAlmostEqual(res["agent"]["billed_total_usd"], 32.0,
+                                       places=2)
+                self.assertGreater(res["agent"]["remaining_s"], 59 * 86400)
+                # the prepaid window lapses -> halted (not destroyed)
                 srv.state["store"].update(agent["id"],
                                            paid_until=time.time() - 10)
                 halted = self._wait_status(api, agent["id"], "halted")
                 self.assertLess(halted["remaining_s"], 0)
-                self.assertFalse(halted["expiring"])
-                # statement shows the prepaid window + purchase ledger
+                self.assertGreater(halted["billed_total_usd"], 0)
+                # statement shows both the trial grant and the paid quote
                 code, _, body = api.raw(
                     "GET", f"/api/agents/{agent['id']}/statement",
                     headers={"X-Admin-Key": ADMIN_KEY})
@@ -611,30 +647,20 @@ class AgencyTest(unittest.TestCase):
                 self.assertEqual(st["price_usd_per_month"], 32.0)
                 self.assertEqual(st["billing_period"], "monthly")
                 self.assertEqual(st["status"], "halted")
-                self.assertGreater(len(st["entries"]), 0)
-                self.assertEqual(st["entries"][0]["note"], "free_tier")
-                self.assertEqual(st["entries"][0]["amount_usd"], 0.0)
-                # renew weekly x2 restarts the home: +14 days at $8/week
-                code, res = api.post(f"/api/agents/{agent['id']}/renew",
-                                     {"period": "weekly", "periods": 2},
-                                     admin=ADMIN_KEY)
-                self.assertEqual(code, 200)
-                a = res["agent"]
-                self.assertEqual(a["status"], "running")
-                self.assertGreater(a["remaining_s"], 13 * 86400)
-                self.assertLessEqual(a["remaining_s"], 14 * 86400)
-                self.assertEqual(a["periods_bought"], 3)       # 1 free + 2
-                self.assertAlmostEqual(a["billed_total_usd"], 16.0, places=2)
-                # renew by calendar days: 10 days, pro-rated at $32/mo.
-                # The window extends contiguously: 14 left + 10 = ~24 days.
+                self.assertEqual(st["trial_days"], 30)
+                notes = [e["note"] for e in st["entries"]]
+                self.assertIn("trial 30d", notes)
+                self.assertTrue(any("quote" in n for n in notes))
+                # renew by calendar days, pro-rated at $32/mo, restarts it
                 code, res = api.post(f"/api/agents/{agent['id']}/renew",
                                      {"days": 10}, admin=ADMIN_KEY)
                 self.assertEqual(code, 200)
                 a = res["agent"]
-                self.assertGreater(a["remaining_s"], 23 * 86400)
-                self.assertLessEqual(a["remaining_s"], 24 * 86400)
-                self.assertEqual(a["periods_bought"], 4)
-                self.assertAlmostEqual(a["billed_total_usd"], 26.67, places=2)
+                self.assertEqual(a["status"], "running")
+                self.assertGreater(a["remaining_s"], 9 * 86400)
+                self.assertLessEqual(a["remaining_s"], 10 * 86400)
+                self.assertEqual(a["periods_bought"], 2)  # 1 paid + 1 renew
+                self.assertAlmostEqual(a["billed_total_usd"], 42.67, places=2)
                 # a nonsense renewal is rejected
                 code, _ = api.post(f"/api/agents/{agent['id']}/renew",
                                    {"days": 0}, admin=ADMIN_KEY)
@@ -646,7 +672,6 @@ class AgencyTest(unittest.TestCase):
     def test_disk_preflight_low_space(self):
         with tempfile.TemporaryDirectory(prefix="agenc-disk-") as d:
             cfg = make_config(d)
-            cfg["billing"]["free_tier_containers"] = 0
             srv, api = self._spin_server(cfg)
             try:
                 # a nearly-full storage (5 GB free < 8.8 GB needed for standard)
@@ -671,7 +696,6 @@ class AgencyTest(unittest.TestCase):
     def test_scheduled_destroy_ttl(self):
         with tempfile.TemporaryDirectory(prefix="agenc-ttl-") as d:
             cfg = make_config(d)
-            cfg["billing"]["free_tier_containers"] = 0
             srv, api = self._spin_server(cfg)
             try:
                 code, res = api.post("/api/agents", {
@@ -693,7 +717,6 @@ class AgencyTest(unittest.TestCase):
     def test_scheduled_destroy_cancel_and_past(self):
         with tempfile.TemporaryDirectory(prefix="agenc-ttl2-") as d:
             cfg = make_config(d)
-            cfg["billing"]["free_tier_containers"] = 0
             srv, api = self._spin_server(cfg)
             try:
                 code, res = api.post("/api/agents", {

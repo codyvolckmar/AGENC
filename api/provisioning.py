@@ -78,7 +78,7 @@ def build_params(px: Proxmox, cfg: dict, agent: dict) -> tuple[int, str, int, di
 
     Sizing comes from the agent's plan (stored on the record at request
     time): memory_mb, disk_gb, cores (0 = all host cores, shared),
-    cpuunits, price_per_hour. Disk headroom is preflighted first.
+    cpuunits, price_usd_per_month. Disk headroom is preflighted first.
     """
     pve_cfg = cfg["proxmox"]
     c = cfg["container"]
@@ -341,7 +341,8 @@ def _poll_stack(store, cfg: dict, px: Proxmox, agent: dict) -> None:
         )
 
 
-def destroy_home(store, cfg: dict, px: Proxmox, agent: dict) -> None:
+def destroy_home(store, cfg: dict, px: Proxmox, agent: dict,
+                 reason: str | None = None) -> None:
     """Delete the container and mark the record destroyed."""
     vmid = agent.get("vmid")
     if vmid:
@@ -352,7 +353,7 @@ def destroy_home(store, cfg: dict, px: Proxmox, agent: dict) -> None:
     if quote:
         agent["quote"] = cancel(quote)
     store.update(agent["id"], status="destroyed", destroyed_at=int(time.time()),
-                 destroy_scheduled_at=None)
+                 destroy_scheduled_at=None, destroyed_reason=reason)
 
 
 # -------------------------------------------------- scheduled destroy

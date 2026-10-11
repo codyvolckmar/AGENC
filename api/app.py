@@ -32,7 +32,8 @@ from urllib.parse import unquote, urlparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from proxmox import Proxmox, ProxmoxError  # noqa: E402
-from billing import (credit_periods,  # noqa: E402
+from billing import (billed as bill_billed,  # noqa: E402
+                     credit_periods,
                      renew as billing_renew, remaining_s,
                      statement as billing_statement, tick as billing_tick)
 from plans import (days_of, default_period, default_plan, get_period,  # noqa: E402
@@ -51,10 +52,10 @@ SSH_KEY_PREFIXES = ("ssh-rsa ", "ssh-ed25519 ", "ecdsa-sha2-", "sk-ssh-", "sk-ec
 PUBLIC_FIELDS = (
     "id", "hostname", "status", "ip", "vmid", "cores", "memory_mb",
     "disk_gb", "cpuunits", "created_at", "updated_at", "email", "purpose",
-    "free_tier", "plan", "price_usd_per_month", "billing_period",
-    "period_days", "period_price_usd", "paid_until", "expiring",
-    "periods_bought", "billed_total_usd", "halted_at",
-    "destroy_scheduled_at",
+    "free_tier", "trial_days", "plan", "price_usd_per_month",
+    "billing_period", "period_days", "period_price_usd", "paid_until",
+    "expiring", "periods_bought", "billed_total_usd", "halted_at",
+    "destroyed_reason", "destroy_scheduled_at",
     "quote", "error", "task", "template", "stack",
     "stack_status",
 )
@@ -106,6 +107,7 @@ def public_agent(agent: dict) -> dict:
     out = {k: agent.get(k) for k in PUBLIC_FIELDS if k in agent}
     out["remaining_s"] = remaining_s(agent)
     out["expiring"] = bool(agent.get("expiring"))
+    out["on_trial"] = bill_billed(agent) == 0 and bool(agent.get("paid_until"))
     return out
 
 
@@ -341,7 +343,7 @@ class AgencyHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "default_plan": default_plan(cfg),
                     "default_period": default_period(cfg),
-                    "free_periods": cfg["billing"].get("free_periods", 1),
+                    "trial_days": int(cfg["billing"].get("trial_days", 30)),
                     "warn_before_s": cfg["billing"].get("warn_before_s", 86400),
                     "periods": periods_catalog(cfg),
                     "plans": plans_catalog(cfg),
@@ -389,20 +391,19 @@ class AgencyHandler(BaseHTTPRequestHandler):
                     "storage": storage,
                     "billing": {
                         "default_period": default_period(cfg),
-                        "free_periods": cfg["billing"].get("free_periods", 1),
+                        "trial_days": int(cfg["billing"].get("trial_days", 30)),
                         "warn_before_s": cfg["billing"].get("warn_before_s", 86400),
                         "periods": periods_catalog(cfg),
                         "plans": plans_catalog(cfg),
                     },
                     "agents": {
                         "alive": store.alive_count(),
-                        "billed": store.metered_count(),
+                        "prepaid": store.prepaid_count(),
                         "total": len(store.all()),
                     },
-                    "free_tier": {
-                        "used": store.free_tier_used(),
-                        "limit": int(cfg["billing"].get("free_tier_containers", 1)),
-                        "unlimited": int(cfg["billing"].get("free_tier_containers", 1)) == 0,
+                    "trial": {
+                        "days": int(cfg["billing"].get("trial_days", 30)),
+                        "on_trial": store.on_trial_count(),
                     },
                     "uptime_s": int(time.time()) - self.state["started_at"],
                 })
@@ -425,9 +426,7 @@ class AgencyHandler(BaseHTTPRequestHandler):
                     return self.error_json(409, f"hostname '{hostname}' is already in use", "conflict")
 
                 billing = cfg["billing"]
-                free_limit = int(billing.get("free_tier_containers", 1))
-                # 0 = unlimited free homes (billing disabled / dev mode)
-                free_tier = free_limit == 0 or store.free_tier_used() < free_limit
+                trial_days = int(billing.get("trial_days", 30))
                 agent_id = new_id("ag")
                 # customer-curated app stack (validated against the manifest)
                 stack_raw = body.get("stack", [])
@@ -470,35 +469,33 @@ class AgencyHandler(BaseHTTPRequestHandler):
                     "periods_bought": 0,
                     "expiring": False,
                     "ledger": [],
-                    "free_tier": free_tier,
+                    "free_tier": True,   # every home starts on the free trial
+                    "trial_days": trial_days,
                     "created_at": int(time.time()),
                     "request_ip": self.client_address[0],
                 }
 
-                if free_tier:
-                    free_periods = int(billing.get("free_periods", 1))
-                    agent["status"] = "provisioning"
-                    if free_periods > 0:
-                        credit_periods(agent, free_periods, period_days,
-                                       price=0.0, label="free_tier")
-                else:
-                    agent["status"] = "quote_required"
-                    agent["quote"] = create_quote(
-                        agent_id, billing, amount_usd=period_cost,
-                        plan=requested_plan, period=period, days=period_days)
+                # The free trial: provision now so the customer can settle in;
+                # a quote is always on hand for when they're ready to pay.
+                agent["status"] = "provisioning"
+                if trial_days > 0:
+                    credit_periods(agent, 1, trial_days, price=0.0,
+                                   label=f"trial {trial_days}d",
+                                   bump_periods=False)
+                agent["quote"] = create_quote(
+                    agent_id, billing, amount_usd=period_cost,
+                    plan=requested_plan, period=period, days=period_days)
 
                 store.add(agent)
 
-                if free_tier:
-                    try:
-                        start_provision(store, cfg, pve, agent)
-                    except ProxmoxError as exc:
-                        return self.send_json(502, {"ok": True, "created": True,
-                                                     "agent": public_agent(store.get(agent_id)),
-                                                     "warning": f"creation failed on node: {exc}"})
-                log.info("agent requested: %s free_tier=%s plan=%s status=%s stack=%s credit=%.2f",
-                         hostname, free_tier, agent["plan"], agent["status"],
-                         agent.get("stack") or [], agent.get("credit_usd") or 0)
+                try:
+                    start_provision(store, cfg, pve, agent)
+                except ProxmoxError as exc:
+                    return self.send_json(502, {"ok": True, "created": True,
+                                                 "agent": public_agent(store.get(agent_id)),
+                                                 "warning": f"creation failed on node: {exc}"})
+                log.info("agent requested: %s plan=%s period=%s trial=%dd status=%s",
+                         hostname, agent["plan"], period, trial_days, agent["status"])
                 return self.send_json(201, {"ok": True, "created": True,
                                             "agent": public_agent(store.get(agent_id))})
 
@@ -522,25 +519,22 @@ class AgencyHandler(BaseHTTPRequestHandler):
                 agent = store.get(parts[2])
                 if not agent:
                     return self.error_json(404, "no such agent", "not_found")
-                if agent.get("status") != "quote_required":
-                    return self.error_json(409, "agent is not awaiting payment", "conflict")
+                if agent.get("status") == "destroyed":
+                    return self.error_json(409, "agent is destroyed", "conflict")
+                if not agent.get("quote"):
+                    return self.error_json(409, "agent has no quote to confirm", "conflict")
                 agent["quote"] = confirm_quote(agent["quote"], agent["id"])
                 days = int(agent["quote"].get("days") or agent.get("period_days") or 30)
                 amount = float(agent["quote"].get("amount") or 0.0)
-                now = time.time()
-                store.update(
-                    agent["id"], status="provisioning",
-                    paid_until=now + days * 86400,
-                    periods_bought=1,
-                    billed_total_usd=round(amount, 2),
-                    expiring=False,
-                    ledger=[{"at": int(now), "days": days,
-                             "amount_usd": round(amount, 2),
-                             "note": f"quote {agent['quote']['id']}"}])
-                start_provision(store, cfg, pve, agent)
-                log.info("payment confirmed for %s — prepaid %d days of %s, provisioning",
-                         agent["id"], days, agent.get("plan"))
-                return self.send_json(200, {"ok": True, "agent": public_agent(store.get(agent["id"]))})
+                renewed = billing_renew(store, cfg, pve, agent, days, amount,
+                                        f"quote {agent['quote']['id']}", count=1)
+                log.info("payment confirmed for %s — +%d days prepaid (until %s)",
+                         agent["id"], days,
+                         time.strftime("%Y-%m-%d",
+                                       time.localtime(float(renewed.get("paid_until") or 0))))
+                return self.send_json(200, {"ok": True, "agent": public_agent(renewed),
+                                            "statement": billing_statement(
+                                                cfg, store.get(agent["id"]))})
 
             # ---- retry a failed provisioning (admin)
             if method == "POST" and len(parts) == 4 and parts[:2] == ["api", "agents"] \
