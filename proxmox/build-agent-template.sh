@@ -123,8 +123,7 @@ BUILD_STORAGE="$(pick_build_storage 2>/tmp/agenc-bs.err)" || {
     echo "!! no storage with 'rootdir' content (needed for the build container)." >&2
     echo "   Easiest fix: Datacenter -> Storage -> local -> Edit -> Content:" >&2
     echo "   tick 'Container' (adds rootdir to a dir storage that already" >&2
-    echo "   holds vztmpl), or run: pvesh set /cluster/storage/local" >&2
-    echo "   --content vztmpl,iso,backup,snippets,rootdir" >&2
+    echo "   holds vztmpl), or run: pvesm set local --content vztmpl,iso,backup,snippets,rootdir" >&2
     echo "   (or set BUILD_STORAGE=… explicitly)" >&2
   fi
   exit 1
