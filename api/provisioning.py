@@ -218,12 +218,17 @@ def _finish_home(store, agent: dict, ip: str | None) -> None:
 # ------------------------------------------------------------ app stacks
 def _start_stack(store, cfg: dict, px: Proxmox, agent: dict) -> None:
     """Launch the curated stack installer in the container, detached."""
-    from stacks import apt_packages, venv_packages, venv_requested
+    from stacks import apt_packages, filter_apt, venv_packages, venv_requested
 
     stack = agent.get("stack") or []
     vmid = agent.get("vmid")
     parts = []
     pkgs = apt_packages(stack, include_baked=False)
+    if pkgs and not cfg.get("dry_run"):
+        pkgs, dropped = filter_apt(pkgs)
+        if dropped:
+            log.warning("agent %s: apt-unavailable stack packages skipped: %s",
+                        agent["id"], ", ".join(dropped))
     if pkgs:
         parts.append(
             "DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a "
