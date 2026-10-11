@@ -112,7 +112,7 @@
         (agent.price_usd_per_month ? " · " + fmtUsd(agent.price_usd_per_month) + "/mo" : "")) +
       row("specs", agent.memory_mb + " MB RAM · " + agent.disk_gb + " GB disk · " + (agent.cores ? agent.cores : "—") + " cores") +
       row("billing", esc(agent.billing_period || "—") +
-        (agent.paid_until ? " · paid up to " + dateStr(agent.paid_until) : "")) +
+        (agent.paid_until ? " · " + (agent.on_trial ? "trial until " : "paid up to ") + dateStr(agent.paid_until) : "")) +
       (agent.vmid ? row("vmid", agent.vmid) : "") +
       (agent.ip ? row("ip", agent.ip + '  <code style="border:none;background:none;padding:0;">ssh root@' + esc(agent.ip) + "</code>") : "") +
       (agent.billed_total_usd ? row("billed to date", fmtUsd(agent.billed_total_usd)) : "") +
@@ -122,7 +122,9 @@
     if (agent.status === "halted") {
       warn = '<p style="color:var(--danger);font-size:13px;">⛔ halted — prepaid period lapsed. Ask the operator to renew or destroy this home.</p>';
     } else if (agent.expiring) {
-      warn = '<p style="color:var(--warn);font-size:12.5px;">⚠ prepaid period ends ' + dateStr(agent.paid_until) + " — renew before then or the home halts.</p>";
+      warn = agent.on_trial
+        ? '<p style="color:var(--warn);font-size:12.5px;">⚠ trial ends ' + dateStr(agent.paid_until) + " — pay before then or the home is deleted.</p>"
+        : '<p style="color:var(--warn);font-size:12.5px;">⚠ prepaid period ends ' + dateStr(agent.paid_until) + " — renew before then or the home halts.</p>";
     }
     return (
       '<h3>' + statusDot(agent.status) + " " + esc(agent.hostname) + "</h3>" +
@@ -175,9 +177,7 @@
   function showResult(agent) {
     result.hidden = false;
     result.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    resultTitle.textContent = agent.status === "quote_required"
-      ? "Quote issued — pay in " + agent.quote.asset
-      : "Home requested";
+    resultTitle.textContent = agent.on_trial ? "Trial home requested" : "Home requested";
     resultBody.innerHTML = agentPanel(agent);
   }
 
@@ -259,10 +259,9 @@
       }
       var note = $("#plan-note");
       if (note) {
-        var fp = res.free_periods || 0;
-        note.textContent = fp
-          ? "First home is free for " + fp + " period" + (fp === 1 ? "" : "s") +
-            " — after that, pay up front per " + (res.default_period || "monthly") + "."
+        var trial = res.trial_days || 0;
+        note.textContent = trial
+          ? "Every home starts with " + trial + " days of free hosting — pay before the trial ends or the home is deleted."
           : "All homes are paid up front per period.";
       }
     }).catch(function () { /* plans down — form still works, server default applies */ });
@@ -339,12 +338,12 @@
 
   /* live health strip ----------------------------------------------------- */
   api("/api/health").then(function (res) {
-    if (res && res.ok && res.free_tier) {
-      var free = res.free_tier;
+    if (res && res.ok && res.trial) {
       var id = $("#free-badge");
       if (id) {
-        if (free.limit === 0) id.textContent = "all homes free right now";
-        else id.textContent = free.used >= free.limit ? "quote in USDC/USDT" : "the first home is free";
+        id.textContent = res.trial.days
+          ? res.trial.days + "-day trial, then pay up front"
+          : "paid up front per period";
       }
     }
   }).catch(function () { /* api not up yet — form still works, server will 401 */ });

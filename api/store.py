@@ -65,11 +65,12 @@ class Store:
         with self._lock:
             return list(self.agents.values())
 
-    def free_tier_used(self) -> int:
-        """Number of *live* agents on the free tier (destroyed homes free their slot)."""
+    def on_trial_count(self) -> int:
+        """Homes still inside their free trial (prepaid window, never paid)."""
         return sum(
             1 for a in self.all()
-            if a.get("free_tier") and a.get("status") != "destroyed"
+            if a.get("paid_until") and not (a.get("billed_total_usd") or 0)
+            and a.get("status") in {"provisioning", "running"}
         )
 
     def hostname_taken(self, hostname: str) -> bool:
@@ -84,7 +85,7 @@ class Store:
             1 for a in self.all() if a.get("status") in {"provisioning", "running"}
         )
 
-    def metered_count(self) -> int:
+    def prepaid_count(self) -> int:
         """Homes on a prepaid window (billing health/dashboards)."""
         return sum(
             1 for a in self.all()

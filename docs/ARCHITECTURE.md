@@ -7,9 +7,10 @@
 2. **Plan-sized homes**: customers pick micro / nano / standard
    (RAM / disk / cores → USD/month, mainstream-competitive specs);
    unprivileged LXC, disk preflighted.
-3. **Prepaid period billing**: pay up front weekly / fortnightly / monthly;
-   a prepaid-window watchdog (`expiring` → `halted`), a per-home ledger +
-   statement, renew, and TTL scheduled destroys.
+3. **30-day free trial, then prepaid periods**: every home provisions
+   instantly and runs free for `trial_days`; at the trial's end an unpaid
+   VM is **deleted** while a home that paid and lapsed is halted; renew,
+   ledger + per-home statement, and TTL scheduled destroys.
 4. Zero-dependency deployment on a stock Debian/Proxmox node: Python 3
    stdlib only, one systemd service, one nginx vhost.
 
@@ -39,20 +40,21 @@ tests/test_api.py        end-to-end tests against dry-run Proxmox
 click "Request home" (website)
         │  POST /api/agents  (X-Agency-Secret)
         ▼
-validate → rate-limit → hostname-uniqueness check
+validate → rate-limit → hostname-uniqueness check → plan/period check
         │
-        ├─ free slot left?  ──YES──► status = provisioning
-        │                              start_provision() ──► PVE create LXC
-        │                              (async task UPID returned)
-        └─ NO ──► status = quote_required
-                   quote = create_quote()  (USDC/USDT, amount, address,
-                                            reference = agent id)
+        ├─ status = provisioning, start_provision() ──► PVE create LXC
+        │      (async task UPID returned)
+        │
+        └─ trial window opened (billing.trial_days) + quote issued:
+              create_quote()  (USDC/USDT, amount, address,
+                               reference = agent id)
                           │
           customer sends stablecoin on-chain with memo=reference
+          (any time during the trial)
                           │
         operator/webhook  ▼
    POST /api/agents/:id/confirm-payment   (X-Admin-Key)
-        │  status = paid, status = provisioning, start_provision()
+        │  quote = paid; paid_until extends past the trial
         ▼
 watchdog thread polls PVE task every poll_interval_s
         │  GET /nodes/:node/tasks/:upid/status
@@ -71,7 +73,11 @@ Metering and lifecycle (same watchdog, next pass):
 status = running & paid_until set
         │  billing.tick every poll pass
         ├─ paid_until - now <= warn_before_s  → expiring = true (warns)
-        └─ paid_until <= now  → px.stop_lxc(vmid); status = halted
+        └─ paid_until <= now
+            ├─ never paid (billed_total == 0)
+            │     → destroy_home(reason="trial expired…", claim the VM)
+            └─ paid at least once
+                  → px.stop_lxc(vmid); status = halted (renewable)
 
 any non-destroyed home with destroy_scheduled_at <= now
         └─ destroy_home() — the scheduled TTL executed by the watchdog
@@ -136,10 +142,11 @@ record and gives the home a prepaid window (`paid_until`):
 
 | Event | Consequence |
 |---|---|
-| free-tier creation | `free_periods` (default 1) prepaid at $0 — `credit_periods()` |
-| quote confirmed | `paid_until = now + period.days`; ledger entry with the quote id |
+| creation | provisioned instantly + trial window: `credit_periods(1, trial_days, $0)`, `on_trial` until first payment; quote issued |
+| quote confirmed | window extends past the trial: `paid_until = max(paid_until, now) + period.days`; ledger entry with the quote id |
 | `paid_until - now ≤ warn_before_s` | `expiring: true` — warns, keeps running |
-| `paid_until ≤ now` | `px.stop_lxc()`, status `halted`, `halted_at` set — billing stops |
+| trial ends unpaid | `destroy_home(reason="trial expired…")` — the VM is deleted and disk reclaimed |
+| paid home lapses | `px.stop_lxc()`, status `halted`, `halted_at` set — renewed to resume |
 | `renew` (period/count or days) | window extends contiguously (`base = max(paid_until, now)`); halted home restarts |
 | `destroy_scheduled_at` passes | `process_schedules()` → `destroy_home()` — the TTL, executed by the watchdog |
 
@@ -227,7 +234,7 @@ The agent-native surfaces are covered too: `llms.txt`/`llms-full.txt`,
 the markdown twins, `Accept` negotiation (markdown vs HTML vs JSON, API
 never negotiates), the error envelope + `request_id`, HEAD probes and
 negotiated 404s. Billing is covered end to end: plan + period catalog and
-validation, quote amount = period price, prepaid window on confirm,
-expiry warning → halt, statements, renew (period and days), disk-space
-preflight failures, and scheduled destroys (TTL, cancel, past-date
-rejection, admin-only).
+validation, quote at creation, the 30-day trial window, payment extending
+past the trial, trial-end **delete** vs paid-home **halt**, expiry warning,
+statements, renew (period and days), disk-space preflight failures, and
+scheduled destroys (TTL, cancel, past-date rejection, admin-only).

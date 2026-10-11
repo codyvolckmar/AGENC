@@ -54,8 +54,7 @@
   },
 
   "billing": {
-    "free_tier_containers": 1,
-    "free_periods": 1,
+    "trial_days": 30,
     "default_period": "monthly",
     "default_plan": "standard",
     "warn_before_s": 86400,

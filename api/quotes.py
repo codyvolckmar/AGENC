@@ -1,10 +1,10 @@
 """Stablecoin quote engine.
 
-First homes are free (see `billing.free_tier_containers`). Every
-subsequent web-provisioned container gets a machine-readable quote
-denominated in USDC/USDT: a fixed price, a receive address and a unique
-`reference` the customer puts in the payment memo so the operator can
-match the on-chain transfer to the agent home.
+Every home starts with a free trial (see `billing.trial_days`); a quote is
+issued at creation so the customer can prepay a billing period whenever
+ready. Quotes are denominated in USDC/USDT: a fixed price, a receive
+address and a unique `reference` the customer puts in the payment memo so
+the operator can match the on-chain transfer to the home.
 
 Real on-chain confirmation (e.g. scanning the chain or a payment
 provider webhook) plugs into `POST /api/agents/<id>/confirm-payment`.

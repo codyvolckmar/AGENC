@@ -11,16 +11,14 @@ AGENCY is a small self-hosted hosting provider: a website plus a provisioning
 API that spin up dedicated container homes for AI agents on your own
 [Proxmox VE] node.
 
-- First home **free** — no card, no signup ceremony; free homes come with
-  the first **prepaid period** on us (`billing.free_periods`).
-- Every further web-provisioned home is **quoted in USDC/USDT** (stablecoin)
-  with a unique payment reference; the confirmed amount prepays one billing
-  period.
+- **Free hosting for 30 days** — every home provisions instantly and runs
+  free for the trial (`billing.trial_days`) so the customer can settle in.
+  At trial end the VM is **deleted unless payment received**.
+- **Pay up front, weekly / fortnightly / monthly.** Payment extends the
+  prepaid window (`paid_until`) past the trial; it warns as the window runs
+  out and halts when it lapses — nothing is metered per second.
 - **Plans, not fixed sizing** — pick `micro`, `nano` or `standard`
-  (RAM / disk / cores → USD per month) and a billing period.
-- **Pay up front, weekly / fortnightly / monthly.** Each home has a prepaid
-  window (`paid_until`); it warns as the window runs out and halts when it
-  lapses — nothing is metered per second.
+  (RAM / disk / cores → USD per month).
 - Zero third-party dependencies: Python 3 standard library only.
 
 This document is the contract for driving that API from a shell or from an
@@ -99,34 +97,43 @@ Everything is under `/api`. Public read endpoints need no header.
 Invalid input answers `422` with a `validation` error; a taken hostname
 answers `409` (`conflict`). Requests are rate-limited per IP.
 
-### Free vs paid
+### Free trial, then pay
 
-- If the operator still has a **free slot** left (`billing.free_tier_containers`,
-  default 1), the home **provisions immediately** — `status` is
-  `provisioning`, then `running`, no quote.
-- Otherwise the agent record is `quote_required` and carries a `quote`:
+Every home — free or paid — **provisions immediately** with a 30-day free
+trial (`billing.trial_days`). A USDC/USDT quote (below) is issued at
+creation so the customer can pay at any point; `confirm-payment` marks it
+paid and **extends the window past the trial**: `paid_until =
+max(paid_until, now) + period.days`, so the full trial is always honored.
+
+At the end of the trial (or a purchased period) the watchdog acts:
+
+| The home… | At the deadline the watchdog… |
+|---|---|
+| never paid (trial only) | **deletes the VM** — the trial is the offer; disk is reclaimed |
+| paid at least once, then lapsed | **halts** it (container stopped) and waits for `renew` |
+
+Dev mode (no expiry at all): set `billing.trial_days` to `0`.
 
 ```json
 "quote": {
   "id": "qt-ag_c2dbfee463",
   "asset": "USDC",
-  "amount": "5.00",
-  "price_usd_per_month": "5.00",
+  "amount": "32.00",
+  "plan": "standard",
+  "period": "monthly",
+  "days": 30,
   "chain": "ethereum",
   "network": "ERC-20",
   "address": "0x...",
   "reference": "ag_c2dbfee463",
   "status": "pending",
-  "note": "Send exactly 5.00 USDC on ethereum (ERC-20) to 0x... with memo ag_c2dbfee463."
+  "note": "Send exactly 32.00 USDC on ethereum (ERC-20) to 0x... with memo ag_c2dbfee463. This prepays one monthly (30 days) of the standard plan."
 }
 ```
 
-Send the stablecoin with the `reference` in the memo; once the transfer is
-confirmed (operator, or a payment webhook wired to `confirm-payment`), the
-home gets a prepaid window of the quoted period and provisioning starts.
-Setting `billing.free_tier_containers` to `0` makes every home free — they
-still get `free_periods` prepaid periods. Dev mode (no expiry at all): set
-`free_tier_containers: 0` **and** `free_periods: 0`.
+Send the stablecoin with the `reference` in the memo; on
+`confirm-payment` the quote is marked paid and the home's prepaid window
+extends past the trial by the quoted period.
 
 ## Plans & prepaid periods
 
@@ -135,7 +142,7 @@ defaults. Pricing is **per month**, mainstream-competitive:
 
 ```json
 {"ok": true, "default_plan": "standard", "default_period": "monthly",
- "free_periods": 1, "warn_before_s": 86400,
+ "trial_days": 30, "warn_before_s": 86400,
  "periods": {
    "weekly":      {"days": 7,  "months": 0.25},
    "fortnightly": {"days": 14, "months": 0.5},
@@ -161,17 +168,20 @@ A **period price** is the monthly rate × the period's fraction (0.25 / 0.5 /
 
 While a home exists it carries a prepaid window:
 
-- **free-tier homes** get `billing.free_periods` (default 1) periods free;
-- **paid homes** get one period of their plan when the quote is confirmed;
+- **every home starts with the trial** — `billing.trial_days` (default 30)
+  free; `on_trial` is true until the first payment lands;
+- **paid homes** extend the window past the trial when `confirm-payment`
+  lands (or `renew` adds time);
 - `paid_until` is the wall-clock deadline; `remaining_s` is how much is
-  left; `billing_period`/`period_days`/`period_price_usd` describe the
-  window the home was bought on.
+  left (negative = lapsed); `billing_period`/`period_days`/
+  `period_price_usd` describe the plan the home was bought on.
 
 Within `warn_before_s` (1 day) of the deadline the home is flagged
-`expiring: true` — it warns but keeps running. When the deadline passes,
-the watchdog **stops the container and `halt`s the home**; billing stops
-with it. Renew or destroy to act. A halted home keeps its hostname until
-destroyed.
+`expiring: true` — it warns but keeps running. At the deadline the watchdog
+**deletes** a home that never paid (trial over, `destroyed_reason` recorded)
+and **halts** a home that has paid at least once, stopping the container;
+billing stops with either. A halted home can `renew`; a deleted home must
+be re-requested.
 
 ### Statement, renew, TTL
 
@@ -191,12 +201,11 @@ destroyed.
 
 | Status | Meaning |
 |---|---|
-| `quote_required` | paid path: waiting for payment |
 | `provisioning` | LXC create task running; the watchdog polls it |
 | `running` | container is up; `ip` is set when detected |
-| `halted` | prepaid period lapsed — container stopped, billing stopped |
+| `halted` | paid home's prepaid window lapsed — stopped, waiting for renew |
 | `error` | something failed; the REAL reason is on the record, fix and `retry` |
-| `destroyed` | deleted via `destroy` or a scheduled TTL (frees the free slot) |
+| `destroyed` | deleted (TTL, admin, or trial ended unpaid — see `destroyed_reason`) |
 
 The server's watchdog advances provisioning on its own — you only ever poll
 `GET /api/agents/<id>` until `status` is `running` (or `error`). A curated
@@ -273,7 +282,8 @@ while :; do
   echo "status: $S"
   [ "$S" = running ] && break
   [ "$S" = error ] && exit 1
-  [ "$S" = quote_required ] && break   # paid path: read the quote, pay, then admin confirms
+  [ "$S" = destroyed ] && break   # trial ended unpaid: re-request after paying
+  [ "$S" = expiring ] && break    # pay now or the home is deleted
   sleep 3
 done
 ```
@@ -284,7 +294,7 @@ done
 |---|---|
 | `GET /api/health` | node alive? cpus, mem, agents alive, free-tier used/limit, `net_bridge_ok`, `templates_available` |
 | `GET /api/stacks` | catalog of baked + selectable stack groups, `venv`, `max_groups` |
-| `POST /api/agents` | create (free → provisioning, else `quote_required` + quote) |
+| `POST /api/agents` | create (provisions instantly on the free trial; quote issued for paying) |
 | `GET /api/agents` | public summaries (id, hostname, status, ip, vmid, specs, quote, stack) |
 | `GET /api/agents/<id>` | one agent, full public view |
 | `POST /api/agents/<id>/confirm-payment` | admin: quote → paid, provisions |

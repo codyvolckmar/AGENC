@@ -119,14 +119,14 @@ python3 api/app.py /tmp/my-demo.json # dry_run: true → fake containers
 
 ### 5. Free vs paid
 
-| Home | Flow |
+| Stage | Flow |
 |---|---|
-| **Free** (`billing.free_tier_containers`, default 1) | Provisions **immediately** on request |
-| **Paid** (every home after the free slot) | Returns a **USDC/USDT quote** (amount, chain, receive address, unique `reference`); stays `quote_required` until you confirm the transfer, then provisions |
+| **Free trial** (`billing.trial_days`, default 30) | Every home provisions **immediately** and runs free for the trial — settle in, no card |
+| **At trial end** | If no payment is confirmed, the VM is **deleted** (disk reclaimed). Pay anytime — the quote is issued at creation |
+| **Paid** | `confirm-payment` prepays the quoted period and the window **extends past the trial** (`paid_until`) |
 
-> Set `billing.free_tier_containers` to **`0`** to provision **every** home for
-> free — the "billing off / dev mode" switch (health reports
-> `free_tier.unlimited: true` and the site badge changes to "all homes free").
+> Set `billing.trial_days` to **`0`** for the "billing off / dev mode" switch
+> — homes provision and never expire (health reports `trial.days: 0`).
 
 Confirm a paid transfer (operator or payment webhook):
 
@@ -300,13 +300,15 @@ contract):
   `period` (defaults: `billing.default_plan` / `billing.default_period`).
   Period prices are the plan's `price_usd_per_month` × the period's
   fraction (`billing.periods`: weekly 0.25, fortnightly 0.5, monthly 1.0).
-- **Prepaid window.** Free homes get `billing.free_periods` (default 1)
-  periods free; a paid quote's `amount` is the period price, and
-  `confirm-payment` opens the window: `paid_until = now + period.days`.
+- **Prepaid window.** Every home starts with `billing.trial_days` (default
+  30) free; a paid quote's `amount` is the period price, and
+  `confirm-payment` extends the window past the trial:
+  `paid_until = max(paid_until, now) + period.days`.
 - **The watchdog** checks every home's window: within `warn_before_s` (1d)
-  it sets `expiring`; at the deadline it stops the container and `halt`s
-  the home — billing stops with it. Nothing is metered per second.
-  Dev mode (no expiry): `free_tier_containers: 0` + `free_periods: 0`.
+  it sets `expiring`; at the deadline, a home that has **never paid** is
+  **deleted** (the trial is the offer), while a home that paid and lapsed
+  is `halt`ed (stops, waits for renew). Dev mode (no expiry):
+  `trial_days: 0`.
 - **Operate it.** `statement` reads the window + purchase ledger; `renew`
   extends it (`{"period": "weekly", "periods": N}` or `{"days": N}`,
   pro-rated at the monthly rate) and restarts a halted home;

@@ -44,16 +44,18 @@ def warn_before_s(cfg: dict) -> float:
 
 # ----------------------------------------------------------- credits
 def credit_periods(agent: dict, count: int, days: int, price: float = 0.0,
-                   label: str = "period") -> dict:
+                   label: str = "period", bump_periods: bool = True) -> dict:
     """Add `count` prepaid periods to `agent` in place (creation helper).
 
-    Used for free-tier sign-up periods (price 0) and the paid quote on
-    confirmation. Mutates and returns the agent dict.
+    Used for the free trial window (price 0, not counted in
+    `periods_bought`) and the paid quote on confirmation. Mutates and
+    returns the agent dict.
     """
     now = time.time()
     base = max(float(agent.get("paid_until") or 0.0), now)
     agent["paid_until"] = base + count * int(days) * 86400
-    agent["periods_bought"] = int(agent.get("periods_bought") or 0) + count
+    if bump_periods:
+        agent["periods_bought"] = int(agent.get("periods_bought") or 0) + count
     agent["billed_total_usd"] = round(billed(agent) + float(price) * count, 2)
     ledger = list(agent.get("ledger") or [])
     ledger.append({"at": int(now), "days": int(days) * count,
@@ -81,20 +83,39 @@ def tick(store, cfg: dict, px, agent: dict) -> None:
     now = time.time()
     left = until - now
     if left <= 0:
-        store.update(
-            agent["id"], status="halted", halted_at=int(now), expiring=False,
-            last_tick_at=now)
-        vmid = agent.get("vmid")
-        if vmid:
+        if billed(agent) > 0:
+            # A paying home that lapsed: stop, halt, wait for renew.
+            store.update(
+                agent["id"], status="halted", halted_at=int(now),
+                expiring=False, last_tick_at=now)
+            vmid = agent.get("vmid")
+            if vmid:
+                try:
+                    px.stop_lxc(vmid)
+                except ProxmoxError as exc:
+                    log.warning("halt %s (vmid %s): could not stop container: %s",
+                                agent["id"], vmid, exc)
+            log.warning("agent %s halted — prepaid period lapsed "
+                        "(%d days at $%.2f/mo; renew to resume)",
+                        agent["id"], int(agent.get("period_days") or 30),
+                        float(agent.get("price_usd_per_month") or 0))
+            return
+        # The free trial with no payment: the offer ends — the VM is
+        # deleted so the box (and its disk) is reclaimed.
+        from provisioning import destroy_home
+        if agent.get("vmid"):
             try:
-                px.stop_lxc(vmid)
+                destroy_home(store, cfg, px, agent,
+                             reason="trial expired with no payment received")
+                log.info("agent %s deleted — %d-day trial lapsed with no payment",
+                         agent["id"], int(agent.get("trial_days") or 30))
             except ProxmoxError as exc:
-                log.warning("halt %s (vmid %s): could not stop container: %s",
-                            agent["id"], vmid, exc)
-        log.warning("agent %s halted — prepaid period lapsed "
-                    "(%d days at $%.2f/mo; renew to resume)",
-                    agent["id"], int(agent.get("period_days") or 30),
-                    float(agent.get("price_usd_per_month") or 0))
+                log.warning("trial-expiry delete failed for %s: %s — retrying",
+                            agent["id"], exc)
+        else:
+            # no container ever got created (failed provision) — just close
+            destroy_home(store, cfg, px, agent,
+                         reason="trial expired with no payment received")
         return
     expiring = left <= warn_before_s(cfg)
     if bool(agent.get("expiring")) != expiring:
@@ -113,6 +134,9 @@ def statement(cfg: dict, agent: dict) -> dict:
         "billing_period": agent.get("billing_period"),
         "period_days": agent.get("period_days"),
         "period_price_usd": agent.get("period_price_usd"),
+        "trial_days": agent.get("trial_days"),
+        "on_trial": bool(agent.get("on_trial")),
+        "destroyed_reason": agent.get("destroyed_reason"),
         "paid_until": paid_until(agent) or None,
         "remaining_s": remaining_s(agent),
         "expiring": bool(agent.get("expiring")),

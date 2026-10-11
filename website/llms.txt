@@ -41,11 +41,12 @@
 
 ## Billing
 
-Homes are **paid up front per billing period** — weekly, fortnightly or
-monthly — at the plan's monthly rate. Each home carries a prepaid window
-(`paid_until`); with `warn_before_s` left it is flagged `expiring`, and at
-the deadline the container is stopped and the home `halted` until renewed
-or destroyed. Free homes get the first period(s) free (`free_periods`).
+**30 days free, then pay up front.** Every home provisions instantly and
+runs free for `billing.trial_days` (default 30), then is **deleted** unless
+payment is received; paying extends the prepaid window past the trial
+(`paid_until`). Periods: weekly / fortnightly / monthly at the plan's
+monthly rate. With `warn_before_s` left it is flagged `expiring`; a home
+that paid and then lapses is `halt`ed (renewable) instead of deleted.
 
 ## Conventions
 
