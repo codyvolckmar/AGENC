@@ -327,7 +327,7 @@ build container lives there and the resulting tarball lands there). The
 script auto-picks one and errors with a fix if missing — typical one-shot:
 
 ```bash
-pvesh set /cluster/storage/local --content vztmpl,iso,backup,snippets,rootdir
+pvesm set local --content vztmpl,iso,backup,snippets,rootdir
 # (or GUI: Datacenter -> Storage -> local -> Edit -> Content: tick 'Container')
 ```
 
